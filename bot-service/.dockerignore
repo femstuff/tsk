@@ -1,0 +1,11 @@
+﻿# Игнорируемые файлы для Go
+.git/
+.gitignore
+*.log
+tmp/
+vendor/
+.idea/
+.vscode/
+downloads/
+*.test
+*.test.exe

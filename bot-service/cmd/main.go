@@ -18,9 +18,10 @@ func main() {
 		log.Fatalf("\nБот упау ERROR: %s", err)
 	}
 
-	//trans := service.NewTranscriptionService(cfg.TelegramToken) // endpoint python serv nushen
+	trans := service.NewTranscriptionService(cfg.WhisperAPIURL) // endpoint python serv nushen
 	msgRepo := repository.NewInMemoryMessage()
-	svc := service.NewBotService(bot, msgRepo, cfg.TelegramToken)
+	svc := service.NewBotService(bot, msgRepo, cfg.TelegramToken, trans)
+	
 
 	log.Println("Сервисы встали")
 
