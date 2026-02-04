@@ -1,9 +1,9 @@
 package repository
 
 import (
-	"errors"
 	"sync"
 	"tg-tsk-bot/internal/entity"
+	"time"
 )
 
 type MessageRepo interface {
@@ -28,9 +28,13 @@ func (r *InMemoryMessage) Save(msg *entity.Message) error {
 	defer r.mu.Unlock()
 
 	if msg.ID == "" {
-		return errors.New("erro, message id not be empty") //по хорошему бы генерацию айди добавить мне впадлу
+		msg.ID = generateID()
 	}
 	// далее подобные темы дописать, которые могут вызвать ошибку при сохранениеи
 
 	return nil
+}
+
+func generateID() string {
+	return time.Now().Format("20060102150405")
 }
