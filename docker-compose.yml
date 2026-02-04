@@ -1,0 +1,23 @@
+﻿
+
+services:
+  whisper-api:
+    build: ./transc-python-service
+    container_name: whisper-api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    
+  telegram-bot:
+    build: ./bot-service
+    container_name: telegram-bot
+    restart: unless-stopped
+    depends_on:
+      - whisper-api
+    environment:
+      - WHISPER_API_URL=http://whisper-api:8000
+    env_file:
+      - ./bot-service/.env
+
+volumes:
+  downloads:
