@@ -1,5 +1,4 @@
-﻿# Makefile для управления Docker
-.PHONY: help build up down restart logs clean
+﻿.PHONY: help build up down restart logs clean
 
 help:
 @echo "Команды для управления:"

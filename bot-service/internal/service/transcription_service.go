@@ -8,9 +8,9 @@ type TranscriptionService struct {
 	api string
 }
 
-func NewTranscriptionService(apuUrl string) *TranscriptionService {
+func NewTranscriptionService(apiUrl string) *TranscriptionService {
 	return &TranscriptionService{
-		api: apuUrl,
+		api: apiUrl,
 	}
 }
 
@@ -20,10 +20,6 @@ func (s *TranscriptionService) Send(filepath string) (string, error) {
 		return "", err
 	}
 	defer file.Close()
-	// Нужен короче тут эндпоинт сервиса куда отправлять запрос пока заглушка ниже
-	return "", nil
-}
 
-func (s *TranscriptionService) SendTest(filepath string) (string, error) {
-	return "ФАРИКОВСКИЙ СУЧИЛЬДА", nil
+	return "", nil
 }

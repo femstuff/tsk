@@ -1,6 +1,4 @@
-﻿
-
-services:
+﻿services:
   whisper-api:
     build: ./transc-python-service
     container_name: whisper-api
