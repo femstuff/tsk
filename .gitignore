@@ -1,4 +1,4 @@
 .env
-bot.exe
+bot-service/bot.exe
 .dockerignore
 **/.env

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"tg-tsk-bot/internal/handler"
 	"tg-tsk-bot/internal/repository"
 	"tg-tsk-bot/internal/service"
@@ -12,22 +12,25 @@ import (
 
 func main() {
 	cfg := config.Load()
-	log.Println("Конфиг встау")
+
 	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
-		log.Fatalf("\nБот упау ERROR: %s", err)
+		slog.Error("Ошибка создания бота", "error", err)
+		return
 	}
+
+	slog.Info("Бот авторизован", "username", bot.Self.UserName)
 
 	trans := service.NewTranscriptionService(cfg.WhisperAPIURL)
 	msgRepo := repository.NewInMemoryMessage()
 	svc := service.NewBotService(bot, msgRepo, cfg.TelegramToken, trans)
-
-	log.Println("Сервисы встали")
 
 	tgHand := handler.NewTelegramHandler(svc)
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
 	updates := bot.GetUpdatesChan(u)
+	slog.Info("Бот запущен, слушает канал")
+
 	tgHand.Updates(updates)
 }

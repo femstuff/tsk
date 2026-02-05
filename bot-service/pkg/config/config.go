@@ -1,38 +1,65 @@
 ﻿package config
 
 import (
-	"log"
-	"os"
+	"log/slog"
+	"path/filepath"
+	"runtime"
+	"tg-tsk-bot/pkg/logger"
 
-	"github.com/joho/godotenv"
+	"github.com/spf13/viper"
 )
 
 type Config struct {
-	TelegramToken string
-	ServerPort    string
-	DownDir       string
-	WhisperAPIURL string
+	TelegramToken string `mapstructure:"TG_TOKEN"`
+	WhisperAPIURL string `mapstructure:"WHISPER_API_URL"`
+	ServerPort    string `mapstructure:"SERV_PORT"`
+	DownloadDir   string `mapstructure:"DIRECTORY"`
 }
 
 func Load() *Config {
-	err := godotenv.Load()
-	if err != nil {
-		log.Print("ошибка в загрузке енв")
+	if logger.Log == nil {
+		logger.Init("debug")
 	}
 
-	return &Config{
-		TelegramToken: getEnv("TG_TOKEN", ""),
-		ServerPort:    getEnv("SERV_PORT", "8080"),
-		DownDir:       getEnv("DIRECTORY", "./downloads"),
-		WhisperAPIURL: getEnv("WHISPER_API_URL", "http://localhost:8000"),
-	}
-}
+	_, filename, _, _ := runtime.Caller(0)
+	dir := filepath.Dir(filename)
+	projectRoot := filepath.Join(dir, "..", "..")
 
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	} else {
-		log.Printf("ХУЕТА ПУСТАЯ: %s", key)
+	slog.Debug("Ищем конфиг",
+		"project_root", projectRoot,
+	)
+
+	viper.SetConfigName(".env")
+	viper.SetConfigType("env")
+	viper.AddConfigPath(projectRoot)
+	viper.AddConfigPath(".")
+
+	viper.AutomaticEnv()
+
+	if err := viper.ReadInConfig(); err != nil {
+		slog.Warn(".env не найден, использую переменные окружения", "error", err)
 	}
-	return defaultValue
+
+	var cfg Config
+	if err := viper.Unmarshal(&cfg); err != nil {
+		slog.Error("Ошибка парсинга конфига", "error", err)
+	}
+
+	if cfg.TelegramToken == "" {
+		slog.Error("TG_TOKEN не установлен")
+	}
+
+	tokenPreview := cfg.TelegramToken
+	if len(tokenPreview) > 8 {
+		tokenPreview = tokenPreview[:8] + "..."
+	}
+
+	slog.Info("Конфиг загружен",
+		"token", tokenPreview,
+		"whisper_url", cfg.WhisperAPIURL,
+		"port", cfg.ServerPort,
+		"directory", cfg.DownloadDir,
+	)
+
+	return &cfg
 }

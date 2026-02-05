@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"tg-tsk-bot/internal/repository"
@@ -35,49 +35,51 @@ func (s *BotService) ProcessVoice(voiceID string, chatID int64) error {
 	go func() {
 		file, err := s.bot.GetFile(tgbotapi.FileConfig{FileID: voiceID})
 		if err != nil {
-			log.Printf("Ошибка получения файла: %v", err)
+			slog.Error("Ошибка получения файла", "error", err)
 			s.bot.Send(tgbotapi.NewMessage(chatID, " Ошибка при получении файла от Telegram"))
 			return
 		}
 
 		url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", s.telegramToken, file.FilePath)
-		log.Printf("Скачиваем файл: %s", url)
+		slog.Debug("Скачиваем файл", "url", url)
 
 		resp, err := http.Get(url)
 		if err != nil {
-			log.Printf("Ошибка скачивания: %v", err)
+			slog.Error("Ошибка скачивания", "error", err)
 			s.bot.Send(tgbotapi.NewMessage(chatID, " Ошибка при скачивании файла"))
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			log.Printf("Ошибка HTTP: %s", resp.Status)
+			slog.Error("Ошибка HTTP", "status", resp.Status)
 			s.bot.Send(tgbotapi.NewMessage(chatID, " Ошибка сервера Telegram"))
 			return
 		}
 
 		audioData, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("Ошибка чтения файла: %v", err)
+			slog.Error("Ошибка чтения файла", "error", err)
 			s.bot.Send(tgbotapi.NewMessage(chatID, " Ошибка при чтении файла"))
 			return
 		}
 
-		log.Printf("Файл скачан (%d байт), отправляю на Python API...", len(audioData))
+		slog.Debug("Файл скачан", "bytes", len(audioData))
 
-		text, err := s.sendToWhisperAPI(audioData, "voice.oga", chatID)
+		text, err := s.sendToWhisperAPI(audioData, "voice.oga")
 		if err != nil {
-			log.Printf("Ошибка API: %v", err)
-			text = " Ошибка транскрипции. Тестовый текст: ПРИВЕТ ЭТО ТЕСТ"
+			slog.Error("Ошибка API", "error", err)
+			s.bot.Send((tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка транскрипции. Повторите позднее. %s", err))))
+			return
 		}
 
+		slog.Info("Транскрипция завершена", "text_length", len(text))
 		s.bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf(" Результат:\n%s", text)))
 	}()
 	return nil
 }
 
-func (s *BotService) sendToWhisperAPI(audioData []byte, filename string, chatID int64) (string, error) {
+func (s *BotService) sendToWhisperAPI(audioData []byte, filename string) (string, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -94,7 +96,7 @@ func (s *BotService) sendToWhisperAPI(audioData []byte, filename string, chatID 
 	writer.Close()
 
 	apiURL := s.transcriptionServ.api + "/transcribe"
-	log.Printf("Отправляю на %s", apiURL)
+	slog.Debug("Отправляю на API", "url", apiURL, "bytes", len(audioData))
 
 	req, err := http.NewRequest("POST", apiURL, body)
 	if err != nil {
@@ -115,35 +117,31 @@ func (s *BotService) sendToWhisperAPI(audioData []byte, filename string, chatID 
 		return "", fmt.Errorf("ошибка чтения ответа: %v", err)
 	}
 
-	log.Printf("Ответ от API (%d байт): %s", len(respBody), string(respBody))
+	slog.Debug("Ответ от API", "bytes", len(respBody))
 
 	var result map[string]interface{}
 	err = json.Unmarshal(respBody, &result)
 	if err != nil {
-		return "", fmt.Errorf("ошибка парсинга JSON: %v. Ответ: %s", err, string(respBody))
+		return "", fmt.Errorf("ошибка парсинга JSON: %v", err)
 	}
 
 	if text, ok := result["text"].(string); ok {
 		return text, nil
 	}
 
-	return "", fmt.Errorf("неверный формат ответа: %v", result)
+	return "", fmt.Errorf("неверный формат ответа")
 }
 
 func (s *BotService) ProcessText(text string, chatID int64) error {
+	slog.Debug("Обработка текста", "text", text, "chat_id", chatID)
+
 	resp := fmt.Sprintf(" Текст получен: %s", text)
 	msg := tgbotapi.NewMessage(chatID, resp)
 	_, err := s.bot.Send(msg)
-	return err
-}
 
-func (s *BotService) downloadVoice(fileID string, chatID int64) (string, error) {
-	file, err := s.bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
-		return "", err
+		slog.Error("Ошибка отправки сообщения", "error", err)
 	}
 
-	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", s.telegramToken, file.FilePath)
-	log.Printf("File tipo download from %s", url)
-	return "name-gs", nil
+	return err
 }

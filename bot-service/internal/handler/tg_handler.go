@@ -2,6 +2,7 @@ package handler
 
 import (
 	"log"
+	"log/slog"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -23,8 +24,6 @@ func NewTelegramHandler(botService interface {
 }
 
 func (h *TelegramHandler) Updates(updates tgbotapi.UpdatesChannel) {
-	log.Println("Хендлер запущен")
-
 	for update := range updates {
 		func() {
 			defer func() {
@@ -43,7 +42,10 @@ func (h *TelegramHandler) Updates(updates tgbotapi.UpdatesChannel) {
 				chatID := msg.Chat.ID
 				fileID := msg.Voice.FileID
 
-				log.Printf("Голосовое от %d", chatID)
+				slog.Info("ГОЛОСОВОЕ СООБЩЕНИЕ",
+					"chat_id", chatID,
+					"voice_id", fileID,
+				)
 				go h.botService.ProcessVoice(fileID, chatID)
 				return
 			}
@@ -51,7 +53,9 @@ func (h *TelegramHandler) Updates(updates tgbotapi.UpdatesChannel) {
 			if msg.Text != "" {
 				chatID := msg.Chat.ID
 				text := msg.Text
-				log.Printf("Сообщение от %d: %s", msg.Chat.ID, msg.Text)
+				slog.Info("ТЕКСТОВОЕ СООБЩЕНИЕ",
+					"chat_id", chatID,
+					"text", msg.Text)
 				go h.botService.ProcessText(text, chatID)
 			}
 		}()
