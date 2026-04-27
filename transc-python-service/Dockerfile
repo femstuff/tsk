@@ -1,18 +1,18 @@
-﻿# Python API Dockerfile
-FROM python:3.10-slim
+﻿FROM python:3.10-slim
 
 WORKDIR /app
 
-# Установка FFmpeg (ОБЯЗАТЕЛЬНО для Whisper!)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Копируем зависимости
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем код
+# Увеличиваем таймаут и используем ретроми
+RUN pip install --default-timeout=100 --retries=5 --upgrade pip && \
+    pip install --default-timeout=100 --retries=5 --no-cache-dir -r requirements.txt
+
 COPY . .
 
 EXPOSE 8000

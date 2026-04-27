@@ -5,17 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 )
-
-type BitrixService struct {
-	webhookURL string
-	client     *http.Client
-}
 
 type MoveDirection string
 
@@ -24,6 +20,11 @@ const (
 	MoveDirectionNext MoveDirection = "next"
 	MoveDirectionPrev MoveDirection = "prev"
 )
+
+type BitrixService struct {
+	webhookURL string
+	client     *http.Client
+}
 
 type bitrixResponse struct {
 	Result           any    `json:"result"`
@@ -72,23 +73,21 @@ func NewBitrixService(webhookURL string, client *http.Client) *BitrixService {
 }
 
 func (s *BitrixService) MoveDealToStage(dealID int, stageID string, direction MoveDirection) (int, string, error) {
+	log.Printf("MoveDealToStage: dealID=%d, stageID=%s, direction=%s", dealID, stageID, direction)
+
 	if strings.TrimSpace(s.webhookURL) == "" {
 		return 0, "", fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
 	}
 	if dealID <= 0 {
 		return 0, "", fmt.Errorf("deal id is required")
 	}
-	if strings.TrimSpace(stageID) == "" {
-		return 0, "", fmt.Errorf("stage id is required")
-	}
 
-	resolvedDealID := dealID
-	deal, err := s.getDealByID(resolvedDealID)
+	deal, err := s.getDealByID(dealID)
 	if err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "not found") {
 			return 0, "", err
 		}
-		resolvedDealID, err = s.FindDealIDByTitle(strconv.Itoa(dealID))
+		resolvedDealID, err := s.FindDealIDByTitle(strconv.Itoa(dealID))
 		if err != nil {
 			return 0, "", fmt.Errorf("deal not found by id; resolve by title failed: %v", err)
 		}
@@ -96,37 +95,67 @@ func (s *BitrixService) MoveDealToStage(dealID int, stageID string, direction Mo
 		if err != nil {
 			return 0, "", err
 		}
+		dealID = resolvedDealID
 	}
 
-	targetStageID := stageID
+	log.Printf("Текущая сделка: ID=%d, Stage=%s, Category=%d", deal.ID, deal.StageID, deal.CategoryID)
+
+	var targetStageID string
+
 	switch direction {
 	case MoveDirectionPrev:
-		prevStageID, prevErr := s.findPrevStageID(deal.StageID, deal.CategoryID)
-		if prevErr != nil {
-			return resolvedDealID, deal.StageID, prevErr
+		log.Printf("Ищем предыдущую стадию для %s", deal.StageID)
+		prevStageID, err := s.findPrevStageID(deal.StageID, deal.CategoryID)
+		if err != nil {
+			return dealID, deal.StageID, err
 		}
 		targetStageID = prevStageID
+		log.Printf("Предыдущая стадия: %s", targetStageID)
+
 	case MoveDirectionNext:
-		nextStageID, nextErr := s.findNextStageID(deal.StageID, deal.CategoryID)
-		if nextErr != nil {
-			return resolvedDealID, deal.StageID, nextErr
+		log.Printf("Ищем следующую стадию для %s", deal.StageID)
+		nextStageID, err := s.findNextStageID(deal.StageID, deal.CategoryID)
+		if err != nil {
+			return dealID, deal.StageID, err
 		}
 		targetStageID = nextStageID
+		log.Printf("Следующая стадия: %s", targetStageID)
+
 	default:
-		if deal.StageID == stageID {
-			nextStageID, nextErr := s.findNextStageID(deal.StageID, deal.CategoryID)
-			if nextErr != nil {
-				return resolvedDealID, deal.StageID, nextErr
+		if stageID != "" {
+			targetStageID = stageID
+
+			_, err := s.findStageIDByName(stageID, deal.CategoryID)
+			if err != nil {
+				log.Printf("Предупреждение: %v", err)
+			}
+			log.Printf("Используем указанную стадию: %s", targetStageID)
+		} else {
+			nextStageID, err := s.findNextStageID(deal.StageID, deal.CategoryID)
+			if err != nil {
+				return dealID, deal.StageID, err
 			}
 			targetStageID = nextStageID
+			log.Printf("Авто-выбрана следующая стадия: %s", targetStageID)
 		}
 	}
 
-	if err := s.updateDealStageByID(resolvedDealID, targetStageID); err != nil {
-		return resolvedDealID, targetStageID, err
+	if targetStageID == "" {
+		return dealID, deal.StageID, fmt.Errorf("не удалось определить целевую стадию")
 	}
 
-	return resolvedDealID, targetStageID, nil
+	if targetStageID == deal.StageID {
+		log.Printf("Целевая стадия совпадает с текущей")
+		return dealID, deal.StageID, nil
+	}
+
+	log.Printf("Обновляем стадию: %s -> %s", deal.StageID, targetStageID)
+	if err := s.updateDealStageByID(dealID, targetStageID); err != nil {
+		return dealID, targetStageID, err
+	}
+
+	log.Printf("Сделка перемещена! ID=%d, новая стадия=%s", dealID, targetStageID)
+	return dealID, targetStageID, nil
 }
 
 func (s *BitrixService) updateDealStageByID(dealID int, stageID string) error {
@@ -327,27 +356,109 @@ func (s *BitrixService) FindDealIDByTitle(title string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if resp.StatusCode >= 300 {
-		return 0, fmt.Errorf("bitrix deal.list status: %s, body: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
 
 	var parsed bitrixDealListResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return 0, err
 	}
-	if parsed.Error != nil || parsed.ErrorDescription != "" {
-		return 0, fmt.Errorf("bitrix deal.list error: %v, description: %s", parsed.Error, strings.TrimSpace(parsed.ErrorDescription))
-	}
+
 	if len(parsed.Result) == 0 {
 		return 0, fmt.Errorf("deal with title %q not found", title)
-	}
-	if len(parsed.Result) > 1 {
-		return 0, fmt.Errorf("found %d deals with title %q", len(parsed.Result), title)
 	}
 
 	id, err := strconv.Atoi(parsed.Result[0].ID)
 	if err != nil {
-		return 0, fmt.Errorf("invalid deal id from bitrix: %s", parsed.Result[0].ID)
+		return 0, err
 	}
 	return id, nil
+}
+
+func (s *BitrixService) findStageIDByName(stageName string, categoryID int) (string, error) {
+	stages, err := s.listStages(categoryID)
+	if err != nil {
+		return "", err
+	}
+
+	stageNameLower := strings.ToLower(stageName)
+
+	mapping := map[string]string{
+		"новый": "NEW",
+		"новая": "NEW",
+		"start": "NEW",
+
+		"в работе":   "EXECUTING",
+		"работаем":   "EXECUTING",
+		"обработка":  "EXECUTING",
+		"выполнение": "EXECUTING",
+		"executing":  "EXECUTING",
+		"in work":    "EXECUTING",
+		"in_work":    "EXECUTING",
+
+		"предоплата":        "PREPAYMENT_INVOICE",
+		"счет":              "PREPAYMENT_INVOICE",
+		"выставлен счет":    "PREPAYMENT_INVOICE",
+		"предоплатный счет": "PREPAYMENT_INVOICE",
+
+		"финальный счет":     "FINAL_INVOICE",
+		"окончательный счет": "FINAL_INVOICE",
+		"финал":              "FINAL_INVOICE",
+		"final invoice":      "FINAL_INVOICE",
+		"final":              "FINAL_INVOICE",
+
+		"подготовка": "PREPARATION",
+		"prepare":    "PREPARATION",
+
+		"успех":    "SUCCESS",
+		"успешно":  "SUCCESS",
+		"выиграли": "SUCCESS",
+		"win":      "SUCCESS",
+
+		"проигрыш":  "FAIL",
+		"проиграли": "FAIL",
+		"потеряли":  "FAIL",
+		"отказ":     "FAIL",
+		"fail":      "FAIL",
+	}
+
+	if mapped, ok := mapping[stageNameLower]; ok {
+		for _, st := range stages {
+			if strings.HasSuffix(st.ID, mapped) {
+				return st.ID, nil
+			}
+		}
+	}
+
+	for _, st := range stages {
+		if strings.Contains(strings.ToLower(st.ID), stageNameLower) ||
+			strings.Contains(strings.ToLower(st.ID), stageNameLower) {
+			return st.ID, nil
+		}
+	}
+
+	for _, st := range stages {
+		if strings.Contains(strings.ToLower(st.ID), stageNameLower) {
+			log.Printf("Найдена стадия по частичному совпадению: %s -> %s", stageName, st.ID)
+			return st.ID, nil
+		}
+	}
+
+	if strings.Contains(stageNameLower, "финальн") || strings.Contains(stageNameLower, "final") {
+		for _, st := range stages {
+			if strings.Contains(strings.ToUpper(st.ID), "FINAL") {
+				log.Printf("Найдена финальная стадия: %s", st.ID)
+				return st.ID, nil
+			}
+		}
+	}
+
+	if strings.Contains(stageNameLower, "предоплат") || strings.Contains(stageNameLower, "prepayment") {
+		for _, st := range stages {
+			if strings.Contains(strings.ToUpper(st.ID), "PREPAYMENT") {
+				log.Printf("Найдена стадия предоплаты: %s", st.ID)
+				return st.ID, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("стадия '%s' не найдена в категории %d", stageName, categoryID)
 }

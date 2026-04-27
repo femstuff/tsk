@@ -5,26 +5,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 )
 
 type Decision struct {
-	ShouldMove    bool   `json:"should_move"`
-	DealID        int    `json:"deal_id"`
-	DealTitle     string `json:"deal_title"`
-	TargetStageID string `json:"target_stage_id"`
-	Reason        string `json:"reason"`
+	ShouldMove  bool        `json:"should_move"`
+	Direction   string      `json:"direction"`
+	DealID      int         `json:"deal_id"`
+	DealTitle   string      `json:"deal_title"`
+	TargetStage interface{} `json:"target_stage"` // может быть string или int
+	Reason      string      `json:"reason"`
 }
 
-type DecisionService struct {
-	apiURL       string
-	apiKey       string
-	model        string
-	defaultStage string
-	client       *http.Client
+func (d *Decision) GetTargetStage() string {
+	if d.TargetStage == nil {
+		return ""
+	}
+	switch v := d.TargetStage.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.Itoa(int(v))
+	case int:
+		return strconv.Itoa(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 type llmRequest struct {
@@ -42,6 +51,14 @@ type llmResponse struct {
 	Choices []struct {
 		Message llmMessage `json:"message"`
 	} `json:"choices"`
+}
+
+type DecisionService struct {
+	apiURL       string
+	apiKey       string
+	model        string
+	defaultStage string
+	client       *http.Client
 }
 
 func NewDecisionService(apiURL, apiKey, model, defaultStage string, client *http.Client) *DecisionService {
@@ -63,8 +80,24 @@ func (s *DecisionService) Analyze(transcribedText string) (Decision, error) {
 		return Decision{}, fmt.Errorf("LLM_API_KEY is empty")
 	}
 
-	systemPrompt := "Ты помощник по продажам. Проанализируй транскрипт звонка/голосового и верни только JSON без markdown. Структура JSON: {\"should_move\": boolean, \"deal_id\": number, \"deal_title\": string, \"target_stage_id\": string, \"reason\": string}. should_move=true только если есть уверенный признак, что сделку нужно переместить. deal_id=0, если ID сделки явно не назван. deal_title заполняй названием сделки из текста (например '67'), если оно произнесено. target_stage_id используй из контекста или оставь пустым."
-	userPrompt := fmt.Sprintf("Транскрипт:\n%s\n\nВерни только JSON.", transcribedText)
+	systemPrompt := `Ты помощник по продажам. Проанализируй транскрипт и верни только JSON.
+
+Доступные стадии: NEW, PREPARATION, EXECUTING, PREPAYMENT_INVOICE, FINAL_INVOICE, SUCCESS, FAIL
+
+Правила:
+1. should_move = true если сказано: да, согласен, перемести, на стадию, в этап
+2. direction = "next" - следующий этап
+   direction = "prev" - предыдущий этап
+   direction = "to_stage" - на конкретную стадию
+3. target_stage = строкой (например "EXECUTING"), НЕ数字
+4. deal_id = число (ID сделки), по умолчанию 0
+5. deal_title = строка (название сделки)
+
+Пример правильного ответа: {"should_move": true, "direction": "to_stage", "target_stage": "EXECUTING", "deal_id": 0, "deal_title": "тест"}
+
+Верни ТОЛЬКО JSON.`
+
+	userPrompt := fmt.Sprintf("Транскрипт: %s", transcribedText)
 
 	reqBody, err := json.Marshal(llmRequest{
 		Model:       s.model,
@@ -78,16 +111,12 @@ func (s *DecisionService) Analyze(transcribedText string) (Decision, error) {
 		return Decision{}, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, s.apiURL, bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", s.apiURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return Decision{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
-	if isOpenRouterURL(s.apiURL) {
-		req.Header.Set("HTTP-Referer", "https://local.transcribation")
-		req.Header.Set("X-Title", "telegram-transcription-bot")
-	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -100,8 +129,8 @@ func (s *DecisionService) Analyze(transcribedText string) (Decision, error) {
 		return Decision{}, err
 	}
 
-	if resp.StatusCode >= 300 {
-		return Decision{}, fmt.Errorf("llm status: %s, body: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	if resp.StatusCode != 200 {
+		return Decision{}, fmt.Errorf("LLM API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var llmResp llmResponse
@@ -109,10 +138,11 @@ func (s *DecisionService) Analyze(transcribedText string) (Decision, error) {
 		return Decision{}, err
 	}
 	if len(llmResp.Choices) == 0 {
-		return Decision{}, fmt.Errorf("llm response has no choices")
+		return Decision{}, fmt.Errorf("no choices in response")
 	}
 
-	content := strings.TrimSpace(llmResp.Choices[0].Message.Content)
+	content := llmResp.Choices[0].Message.Content
+	content = strings.TrimSpace(content)
 	content = strings.TrimPrefix(content, "```json")
 	content = strings.TrimPrefix(content, "```")
 	content = strings.TrimSuffix(content, "```")
@@ -120,30 +150,42 @@ func (s *DecisionService) Analyze(transcribedText string) (Decision, error) {
 
 	var decision Decision
 	if err := json.Unmarshal([]byte(content), &decision); err != nil {
-		return Decision{}, fmt.Errorf("invalid decision json: %w", err)
+		return Decision{}, fmt.Errorf("json parse error: %v, content: %s", err, content)
 	}
 
-	if decision.TargetStageID == "" {
-		decision.TargetStageID = s.defaultStage
+	// Получаем target_stage как строку
+	targetStage := decision.GetTargetStage()
+
+	// Маппинг если пришло число
+	if targetStage != "" && targetStage != "0" {
+		stageMap := map[string]string{
+			"0": "NEW",
+			"1": "PREPARATION",
+			"2": "EXECUTING",
+			"3": "PREPAYMENT_INVOICE",
+			"4": "FINAL_INVOICE",
+			"5": "SUCCESS",
+			"6": "FAIL",
+		}
+		if mapped, ok := stageMap[targetStage]; ok {
+			targetStage = mapped
+		}
 	}
-	decision.DealTitle = strings.TrimSpace(decision.DealTitle)
-	decision.Reason = strings.TrimSpace(decision.Reason)
+
+	decision.TargetStage = targetStage
+
+	if decision.Direction == "" {
+		if strings.Contains(transcribedText, "предыдущ") || strings.Contains(transcribedText, "назад") {
+			decision.Direction = "prev"
+		} else if strings.Contains(transcribedText, "стади") || strings.Contains(transcribedText, "этап") {
+			decision.Direction = "to_stage"
+		} else {
+			decision.Direction = "next"
+		}
+	}
+
+	log.Printf("LLM решение: should_move=%v, direction=%s, deal_id=%d, deal_title=%s, target_stage=%s",
+		decision.ShouldMove, decision.Direction, decision.DealID, decision.DealTitle, decision.GetTargetStage())
 
 	return decision, nil
-}
-
-func (d Decision) Describe() string {
-	dealID := "0"
-	if d.DealID > 0 {
-		dealID = strconv.Itoa(d.DealID)
-	}
-	return fmt.Sprintf("move=%t, deal_id=%s, deal_title=%q, stage=%s, reason=%s", d.ShouldMove, dealID, d.DealTitle, d.TargetStageID, d.Reason)
-}
-
-func isOpenRouterURL(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(parsed.Host, "openrouter.ai")
 }

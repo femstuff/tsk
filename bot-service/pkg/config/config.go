@@ -14,6 +14,15 @@ type Config struct {
 	WhisperAPIURL string `mapstructure:"WHISPER_API_URL"`
 	ServerPort    string `mapstructure:"SERV_PORT"`
 	DownloadDir   string `mapstructure:"DIRECTORY"`
+
+	// Bitrix24
+	BitrixWebhookURL string `mapstructure:"BITRIX_WEBHOOK_URL"`
+
+	// LLM
+	LLMAPIURL      string `mapstructure:"LLM_API_URL"`
+	LLMAPIKey      string `mapstructure:"LLM_API_KEY"`
+	LLMModel       string `mapstructure:"LLM_MODEL"`
+	DefaultStageID string `mapstructure:"DEFAULT_STAGE_ID"`
 }
 
 func Load() *Config {
@@ -45,6 +54,23 @@ func Load() *Config {
 		slog.Error("Ошибка парсинга конфига", "error", err)
 	}
 
+	// Дефолтные значения
+	if cfg.WhisperAPIURL == "" {
+		cfg.WhisperAPIURL = "http://whisper-api:8000"
+	}
+
+	if cfg.LLMAPIURL == "" {
+		cfg.LLMAPIURL = "https://openrouter.ai/api/v1/chat/completions"
+	}
+
+	if cfg.LLMModel == "" {
+		cfg.LLMModel = "gpt-4o-mini"
+	}
+
+	if cfg.DefaultStageID == "" {
+		cfg.DefaultStageID = "C1:NEW"
+	}
+
 	if cfg.TelegramToken == "" {
 		slog.Error("TG_TOKEN не установлен")
 	}
@@ -57,6 +83,8 @@ func Load() *Config {
 	slog.Info("Конфиг загружен",
 		"token", tokenPreview,
 		"whisper_url", cfg.WhisperAPIURL,
+		"bitrix", cfg.BitrixWebhookURL != "",
+		"llm", cfg.LLMAPIKey != "",
 		"port", cfg.ServerPort,
 		"directory", cfg.DownloadDir,
 	)
