@@ -72,3 +72,34 @@ export type MobileVoiceRequestResult = {
   sourceDocument: SourceDocumentSummary;
   taskCommand?: TaskCommandSummary;
 };
+
+/** Задача из Bitrix24 (контекст вебхука на сервере). */
+export type BitrixTaskSummary = {
+  id: string;
+  title: string;
+  status: string;
+  deadline?: string;
+  closedDate?: string;
+};
+
+export type BitrixTaskStats = {
+  totalOpen: number;
+  inProgress: number;
+  overdue: number;
+};
+
+export type BitrixTasksBundle = {
+  responsibleUserId: number;
+  stats: BitrixTaskStats;
+  items: BitrixTaskSummary[];
+};
+
+/** Ответ после разбора запроса и вызова Bitrix. */
+export type MobileBitrixIntentResult = {
+  transcript: string;
+  parsedAction: string;
+  parsedDealId: number;
+  parsedDealTitle: string;
+  bitrixSteps: string[];
+  bitrixConfigured: boolean;
+};

@@ -81,7 +81,9 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   "voice.bitrix_no_deal": "Нет ID сделки для Bitrix",
   "voice.bitrix_deal_move_failed": "Ошибка перемещения сделки",
   "voice.bitrix_deal_moved": "Сделка в Bitrix обновлена",
-  "voice.bitrix_no_action": "Действие Bitrix не распознано"
+  "voice.bitrix_no_action": "Действие Bitrix не распознано",
+  "mobile.bitrix_intent.ok": "Мобильное приложение: Bitrix (успех)",
+  "mobile.bitrix_intent.error": "Мобильное приложение: Bitrix (ошибка)"
 };
 
 const VOICE_ACTION_LABELS: Record<string, string> = {
@@ -123,6 +125,8 @@ const MESSAGE_LABELS: Record<string, string> = {
   "Bitrix card handoff completed": "Передача в Битрикс завершена",
   "Bitrix delivery failed": "Ошибка отправки в Битрикс",
   "Task command stored": "Команда задачи сохранена",
+  "Мобильное приложение: Bitrix — выполнено": "Мобильное приложение: запрос в Bitrix выполнен",
+  "Мобильное приложение: Bitrix — ошибка": "Мобильное приложение: ошибка запроса в Bitrix",
   "Document generation failed": "Ошибка генерации документа",
   "Marked as failed from admin": "Статус изменён на «Ошибка» из админ-панели",
   "Cancelled from admin": "Заявка отменена из админ-панели"
@@ -153,6 +157,21 @@ function translateTemplateName(value: string) {
 
 function translateTemplateDescription(value: string) {
   return translateFromMap(value, TEMPLATE_DESCRIPTION_LABELS);
+}
+
+function formatEventDetails(details: string) {
+  const trimmed = details.trim();
+  if (!trimmed) {
+    return "Без дополнительных деталей.";
+  }
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed;
 }
 
 function translateMessage(value: string) {
@@ -944,7 +963,7 @@ export function DashboardPage() {
                     <span>{formatDate(event.createdAt)}</span>
                   </div>
                 </div>
-                <p className="subtle">{event.details || "Без дополнительных деталей."}</p>
+                <p className="subtle">{formatEventDetails(event.details || "")}</p>
               </div>
             ))}
             {!loading && events.length === 0 ? (

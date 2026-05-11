@@ -6,6 +6,12 @@
     "apps/admin-web",
     "apps/mobile-app"
   ],
+  "overrides": {
+    "expo": "~54.0.34"
+  },
+  "devDependencies": {
+    "babel-preset-expo": "~54.0.10"
+  },
   "scripts": {
     "admin:dev": "npm run dev --workspace @tsk/admin-web",
     "admin:build": "npm run build --workspace @tsk/admin-web",

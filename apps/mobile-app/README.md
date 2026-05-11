@@ -1,6 +1,6 @@
 # TSK Mobile MVP
 
-`apps/mobile-app` is now a minimal Expo client for the local MVP flow.
+`apps/mobile-app` is a minimal Expo client for the local MVP flow (**Expo SDK 54**, совместим с актуальным **Expo Go** из Play Маркета).
 
 ## What works
 

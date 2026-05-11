@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,6 +74,24 @@ func New(webhookURL string, httpClient *http.Client) *Client {
 
 func (c *Client) WebhookConfigured() bool {
 	return c != nil && strings.TrimSpace(c.webhookURL) != ""
+}
+
+var reWebhookRestPath = regexp.MustCompile(`(?i)/rest/(\d+)/[^/]+/?$`)
+
+// WebhookOwnerUserID — числовой ID пользователя Bitrix24 из входящего вебхука …/rest/{userId}/{token}/.
+func (c *Client) WebhookOwnerUserID() (int, error) {
+	if !c.WebhookConfigured() {
+		return 0, fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	u := c.webhookURL
+	if m := reWebhookRestPath.FindStringSubmatch(u); len(m) > 1 {
+		id, err := strconv.Atoi(m[1])
+		if err != nil || id <= 0 {
+			return 0, fmt.Errorf("invalid user id in webhook URL")
+		}
+		return id, nil
+	}
+	return 0, fmt.Errorf("cannot parse user id from BITRIX_WEBHOOK_URL (expected .../rest/{userId}/{token}/)")
 }
 
 type bitrixDeal struct {
@@ -230,6 +249,136 @@ func parseTaskAddResultID(raw json.RawMessage) (string, error) {
 		return strings.TrimSpace(fmt.Sprint(flat.ID)), nil
 	}
 	return "", fmt.Errorf("unexpected tasks.task.add result shape")
+}
+
+// BitrixTaskBrief — краткая запись из tasks.task.list (вебхук = контекст пользователя, создавшего вебхук).
+type BitrixTaskBrief struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	Deadline   string `json:"deadline,omitempty"`
+	ClosedDate string `json:"closedDate,omitempty"`
+}
+
+// ListTasks возвращает последние задачи (без фильтра по ответственному — устаревший режим).
+func (c *Client) ListTasks(ctx context.Context, limit int) ([]BitrixTaskBrief, error) {
+	return c.listTasksPOST(ctx, 0, limit)
+}
+
+// ListTasksForResponsible — задачи, где пользователь responsibleId — ответственный (POST tasks.task.list).
+func (c *Client) ListTasksForResponsible(ctx context.Context, responsibleID int, limit int) ([]BitrixTaskBrief, error) {
+	if responsibleID <= 0 {
+		return nil, fmt.Errorf("responsible user id is required")
+	}
+	return c.listTasksPOST(ctx, responsibleID, limit)
+}
+
+func (c *Client) listTasksPOST(ctx context.Context, responsibleID int, limit int) ([]BitrixTaskBrief, error) {
+	if !c.WebhookConfigured() {
+		return nil, fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	form := url.Values{}
+	if responsibleID > 0 {
+		form.Set("filter[RESPONSIBLE_ID]", strconv.Itoa(responsibleID))
+	}
+	form.Add("select[]", "ID")
+	form.Add("select[]", "TITLE")
+	form.Add("select[]", "STATUS")
+	form.Add("select[]", "DEADLINE")
+	form.Add("select[]", "CLOSED_DATE")
+	form.Set("order[ID]", "desc")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.webhookURL+"/tasks.task.list.json", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var envelope struct {
+		Result           json.RawMessage `json:"result"`
+		Error            any             `json:"error"`
+		ErrorDescription string          `json:"error_description"`
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		_ = json.Unmarshal(body, &envelope)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("bitrix tasks.task.list HTTP %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if envelope.Error != nil || envelope.ErrorDescription != "" {
+		return nil, fmt.Errorf("bitrix error: %v, %s", envelope.Error, strings.TrimSpace(envelope.ErrorDescription))
+	}
+
+	tasks, err := parseTasksListResult(envelope.Result)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) > limit {
+		tasks = tasks[:limit]
+	}
+	return tasks, nil
+}
+
+func parseTasksListResult(raw json.RawMessage) ([]BitrixTaskBrief, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty tasks.task.list result")
+	}
+	var wrapped struct {
+		Tasks []map[string]any `json:"tasks"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Tasks != nil {
+		return mapSliceToTaskBriefs(wrapped.Tasks), nil
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return mapSliceToTaskBriefs(arr), nil
+	}
+	return nil, fmt.Errorf("unexpected tasks.task.list result shape: %s", strings.TrimSpace(string(raw)))
+}
+
+func mapSliceToTaskBriefs(rows []map[string]any) []BitrixTaskBrief {
+	out := make([]BitrixTaskBrief, 0, len(rows))
+	for _, row := range rows {
+		id := fieldFromRow(row, "id", "ID")
+		title := fieldFromRow(row, "title", "TITLE")
+		status := fieldFromRow(row, "status", "STATUS")
+		deadline := fieldFromRow(row, "deadline", "DEADLINE")
+		closed := fieldFromRow(row, "closedDate", "CLOSED_DATE", "closed_date")
+		if id == "" && title == "" {
+			continue
+		}
+		out = append(out, BitrixTaskBrief{
+			ID: id, Title: strings.TrimSpace(title), Status: status,
+			Deadline: deadline, ClosedDate: closed,
+		})
+	}
+	return out
+}
+
+func fieldFromRow(row map[string]any, keys ...string) string {
+	for _, want := range keys {
+		for k, v := range row {
+			if strings.EqualFold(k, want) && v != nil {
+				return strings.TrimSpace(fmt.Sprint(v))
+			}
+		}
+	}
+	return ""
 }
 
 func (c *Client) updateDealStageByID(ctx context.Context, dealID int, stageID string) error {

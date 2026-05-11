@@ -27,6 +27,8 @@ func NewRouter(handler *Handler, collector *metrics.Collector) http.Handler {
 	mux.HandleFunc("POST /api/v1/document-jobs", handler.CreateJob)
 	mux.HandleFunc("PATCH /api/v1/document-jobs/{id}/status", handler.UpdateJobStatus)
 	mux.HandleFunc("POST /api/v1/mobile/voice-requests", handler.CreateMobileVoiceRequest)
+	mux.HandleFunc("POST /api/v1/mobile/bitrix-intent", handler.CreateMobileBitrixIntent)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix-tasks", handler.ListMobileBitrixTasks)
 	mux.HandleFunc("GET /api/v1/source-documents", handler.ListSourceDocuments)
 	mux.HandleFunc("GET /api/v1/source-documents/{id}/download", handler.DownloadSourceDocument)
 	mux.HandleFunc("GET /api/v1/generated-documents", handler.ListGeneratedDocuments)

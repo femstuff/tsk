@@ -123,7 +123,7 @@ export async function listTaskCommands(jobId?: string, init?: RequestInit) {
   return response.items;
 }
 
-export async function listProcessingEvents(limit = 40, init?: RequestInit) {
+export async function listProcessingEvents(limit = 120, init?: RequestInit) {
   const response = await request<CollectionResponse<ProcessingEvent>>(
     `/api/v1/processing-events?limit=${limit}`,
     init

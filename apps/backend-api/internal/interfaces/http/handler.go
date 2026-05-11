@@ -43,6 +43,8 @@ func (h *Handler) Root(w http.ResponseWriter, r *http.Request) {
 			"jobs":                   "/api/v1/document-jobs",
 			"jobStatus":              "/api/v1/document-jobs/{id}/status",
 			"mobileVoiceRequest":     "/api/v1/mobile/voice-requests",
+			"mobileBitrixIntent":     "POST /api/v1/mobile/bitrix-intent",
+			"mobileBitrixTasks":      "GET /api/v1/mobile/bitrix-tasks",
 			"sourceDocuments":        "/api/v1/source-documents",
 			"sourceDocumentDownload": "/api/v1/source-documents/{id}/download",
 			"generatedDocuments":     "/api/v1/generated-documents",
@@ -307,6 +309,110 @@ func (h *Handler) CreateTaskCommand(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"item": command,
 	})
+}
+
+func (h *Handler) ListMobileBitrixTasks(w http.ResponseWriter, r *http.Request) {
+	limit := 60
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	responsibleOverride := 0
+	if value := strings.TrimSpace(r.URL.Query().Get("responsibleId")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			responsibleOverride = parsed
+		}
+	}
+
+	bundle, err := h.service.ListBitrixTasksForMobile(r.Context(), limit, responsibleOverride)
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"responsibleUserId": bundle.ResponsibleUserID,
+		"stats":             bundle.Stats,
+		"items":             bundle.Items,
+	})
+}
+
+func (h *Handler) CreateMobileBitrixIntent(w http.ResponseWriter, r *http.Request) {
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.Contains(ct, "application/json") {
+		var body struct {
+			Text              string `json:"text"`
+			DealID            int    `json:"dealId"`
+			DealTitle         string `json:"dealTitle"`
+			DealHint          string `json:"dealHint"`
+			StageHint         string `json:"stageHint"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid JSON payload")
+			return
+		}
+		result, err := h.service.RunMobileBitrixIntent(r.Context(), app.MobileBitrixIntentInput{
+			Text:              strings.TrimSpace(body.Text),
+			DealIDOverride:    body.DealID,
+			DealTitleOverride: strings.TrimSpace(body.DealTitle),
+			DealHintText:      strings.TrimSpace(body.DealHint),
+			StageHintText:     strings.TrimSpace(body.StageHint),
+		})
+		if err != nil {
+			h.writeDomainError(w, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": result})
+		return
+	}
+
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid multipart payload")
+		return
+	}
+
+	text := strings.TrimSpace(r.FormValue("text"))
+	var audio []byte
+	fileName := "mobile-voice.m4a"
+	mimeType := "audio/mp4"
+	if file, header, err := r.FormFile("audio"); err == nil {
+		defer file.Close()
+		content, readErr := io.ReadAll(file)
+		if readErr != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "unable to read uploaded audio")
+			return
+		}
+		audio = content
+		fileName = header.Filename
+		if mt := strings.TrimSpace(header.Header.Get("Content-Type")); mt != "" {
+			mimeType = mt
+		}
+	}
+
+	dealOverride := 0
+	if raw := strings.TrimSpace(r.FormValue("dealId")); raw != "" {
+		if parsed, convErr := strconv.Atoi(raw); convErr == nil {
+			dealOverride = parsed
+		}
+	}
+
+	result, err := h.service.RunMobileBitrixIntent(r.Context(), app.MobileBitrixIntentInput{
+		Text:              text,
+		Audio:             audio,
+		FileName:          fileName,
+		MimeType:          mimeType,
+		DealIDOverride:    dealOverride,
+		DealTitleOverride: strings.TrimSpace(r.FormValue("dealTitle")),
+		DealHintText:      strings.TrimSpace(r.FormValue("dealHint")),
+		StageHintText:     strings.TrimSpace(r.FormValue("stageHint")),
+	})
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": result})
 }
 
 func (h *Handler) AdminVoiceBitrixPipeline(w http.ResponseWriter, r *http.Request) {

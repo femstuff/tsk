@@ -818,24 +818,20 @@ func (s *Service) createAndDispatchTaskCommand(ctx context.Context, input Create
 }
 
 func (s *Service) sendTaskCommandToBitrix(ctx context.Context, command domain.TaskCommand) (string, error) {
-	payload := fmt.Sprintf(`{"commandId":"%s","text":"%s","target":"%s"}`, command.ID, escapeJSON(command.CommandText), command.TargetSystem)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.integrations.BitrixWebhookURL, bytes.NewBufferString(payload))
-	if err != nil {
-		return "", err
+	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		return "", errors.New("вебхук Bitrix не настроен (BITRIX_WEBHOOK_URL)")
 	}
-	request.Header.Set("Content-Type", "application/json")
-
-	response, err := s.httpClient.Do(request)
-	if err != nil {
-		return "", err
+	// Раньше сюда слали JSON на корень вебхука — у Bitrix это 404. Нужен вызов REST, как в bitrixclient.
+	title := strings.TrimSpace(command.CommandText)
+	if len(title) > 200 {
+		title = title[:200] + "…"
 	}
-	defer response.Body.Close()
-
-	if response.StatusCode >= http.StatusBadRequest {
-		return "", fmt.Errorf("вебхук команды Битрикс вернул статус %d", response.StatusCode)
+	if title == "" {
+		title = "TSK: команда без текста"
 	}
-
-	return fmt.Sprintf("http-%d", response.StatusCode), nil
+	body := fmt.Sprintf("TSK: команда из мобильного приложения\nid=%s\ntarget=%s\n\n%s",
+		command.ID, command.TargetSystem, strings.TrimSpace(command.CommandText))
+	return s.bitrix.AddTask(ctx, title, body)
 }
 
 func (s *Service) failJob(ctx context.Context, job domain.Job, started time.Time, err error) error {
