@@ -3,12 +3,19 @@ import whisper
 import tempfile
 import os
 import sys
+import platform
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
 
-FFMPEG_PATH = r"C:\Users\user\Downloads\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin"
-os.environ["PATH"] = FFMPEG_PATH + ";" + os.environ["PATH"]
+# Локальный Windows-путь к ffmpeg (если есть); в Docker ffmpeg уже в PATH.
+if platform.system() == "Windows":
+    FFMPEG_PATH = os.environ.get(
+        "TSK_FFMPEG_BIN",
+        r"C:\Users\user\Downloads\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin",
+    )
+    if os.path.isdir(FFMPEG_PATH):
+        os.environ["PATH"] = FFMPEG_PATH + ";" + os.environ["PATH"]
 
 print("=" * 60)
 print("Проверка FFmpeg...")
@@ -19,7 +26,8 @@ try:
     print(f"   Версия: {result.stdout.split(chr(10))[0]}")
 except Exception as e:
     print(f"FFmpeg не найден: {e}")
-    print(f"Проверьте путь: {FFMPEG_PATH}")
+    if platform.system() == "Windows":
+        print("Укажите каталог с ffmpeg в переменной TSK_FFMPEG_BIN или установите ffmpeg в PATH.")
     sys.exit(1)
 print("=" * 60)
 

@@ -1,0 +1,15 @@
+{
+  "name": "tsk-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/admin-web",
+    "apps/mobile-app"
+  ],
+  "scripts": {
+    "admin:dev": "npm run dev --workspace @tsk/admin-web",
+    "admin:build": "npm run build --workspace @tsk/admin-web",
+    "mobile:start": "npm run start --workspace @tsk/mobile-app",
+    "mobile:doctor": "npm run doctor --workspace @tsk/mobile-app"
+  }
+}

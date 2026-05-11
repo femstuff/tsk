@@ -12,7 +12,7 @@ type MessageRepo interface {
 }
 
 type InMemoryMessage struct {
-	//легкая заглушка впадлу бд подтягивать еще и поднимать да ну вообще нахуй его
+	//легкая заглушка впадлу бд подтягивать еще и поднимать да ну вообще его
 	messages map[string]*entity.Message
 	mu       sync.Mutex
 }

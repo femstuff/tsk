@@ -1,0 +1,9 @@
+# Опционально: отключить Whisper в backend (нет HTTP к whisper-api).
+# Запуск без долгого старта transc-python-service:
+#   docker compose -f docker-compose.yml -f docker-compose.no-whisper.yml up -d postgres backend-api admin-web
+#
+# Голосовой админ-пайплайн вернёт ошибку про отсутствие Whisper; Bitrix и остальной API работают.
+services:
+  backend-api:
+    environment:
+      WHISPER_BASE_URL: ""

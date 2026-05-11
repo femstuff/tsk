@@ -153,10 +153,8 @@ func (s *DecisionService) Analyze(transcribedText string) (Decision, error) {
 		return Decision{}, fmt.Errorf("json parse error: %v, content: %s", err, content)
 	}
 
-	// Получаем target_stage как строку
 	targetStage := decision.GetTargetStage()
 
-	// Маппинг если пришло число
 	if targetStage != "" && targetStage != "0" {
 		stageMap := map[string]string{
 			"0": "NEW",

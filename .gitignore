@@ -2,3 +2,11 @@
 bot-service/bot.exe
 .dockerignore
 **/.env
+**/node_modules/
+**/dist/
+**/.expo/
+**/.turbo/
+**/coverage/
+infra/grafana/data/
+infra/prometheus/data/
+apps/backend-api/data/

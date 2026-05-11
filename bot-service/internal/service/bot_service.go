@@ -126,7 +126,6 @@ func (s *BotService) ProcessVoice(voiceID string, chatID int64) error {
 					} else {
 						log.Printf("Сделка не найдена: %v", err)
 
-						// Сохраняем запрос для уточнения
 						s.pendingMu.Lock()
 						s.pendingDecisions[chatID] = &pendingDecision{
 							OriginalText: text,
@@ -136,7 +135,6 @@ func (s *BotService) ProcessVoice(voiceID string, chatID int64) error {
 						}
 						s.pendingMu.Unlock()
 
-						// Отправляем сообщение об ошибке
 						msgText := fmt.Sprintf("Сделка с названием \"%s\" не найдена в Bitrix24.\n\nВы имели в виду: %s\n\nЕсли название верное - напишите его еще раз текстом, я повторю поиск.\n\nЕсли название неверное - напишите точное название сделки как она называется в Bitrix24.\n\nПример: ТЕСТОВЫЙ ПРОЕКТ 2024\n\nИли отправьте /cancel чтобы отменить операцию.", decision.DealTitle, decision.DealTitle)
 
 						s.bot.Send(tgbotapi.NewMessage(chatID, msgText))
@@ -203,7 +201,6 @@ func (s *BotService) ProcessText(text string, chatID int64) error {
 		s.pendingMu.Unlock()
 	}
 
-	// Проверяем, есть ли ожидающий запрос
 	s.pendingMu.RLock()
 	pending, exists := s.pendingDecisions[chatID]
 	s.pendingMu.RUnlock()
@@ -248,7 +245,6 @@ func (s *BotService) ProcessText(text string, chatID int64) error {
 			s.bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Сделка #%d (%s) перемещена в стадию: %s", movedDealID, clarifiedTitle, newStage)))
 		}
 
-		// Удаляем pending запрос
 		s.pendingMu.Lock()
 		delete(s.pendingDecisions, chatID)
 		s.pendingMu.Unlock()
@@ -256,7 +252,6 @@ func (s *BotService) ProcessText(text string, chatID int64) error {
 		return nil
 	}
 
-	// Обычный текст
 	resp := fmt.Sprintf("Текст получен: %s\n\nОтправьте голосовое сообщение для транскрипции и перемещения сделки.", text)
 	s.bot.Send(tgbotapi.NewMessage(chatID, resp))
 
