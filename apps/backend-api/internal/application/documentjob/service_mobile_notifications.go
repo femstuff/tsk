@@ -47,3 +47,57 @@ func (s *Service) ListBitrixNotificationsForMobile(ctx context.Context, limit in
 	out.AuthMode = "webhook"
 	return out, nil
 }
+
+func (s *Service) MarkBitrixNotificationReadForMobile(ctx context.Context, notificationID, oauthSessionID string) error {
+	notificationID = strings.TrimSpace(notificationID)
+	if notificationID == "" {
+		return errors.New("notification id is required")
+	}
+	oauthSessionID = strings.TrimSpace(oauthSessionID)
+
+	if oauthSessionID != "" && s.BitrixOAuthEnabled() {
+		session, err := s.ensureActiveBitrixSession(ctx, oauthSessionID)
+		if err != nil {
+			return err
+		}
+		tokenClient := bitrixclient.NewTokenREST(session.PortalDomain, session.RestEndpoint, session.AccessToken, s.httpClient)
+		if err := tokenClient.MarkNotificationRead(ctx, notificationID); err != nil {
+			return bitrixclient.NotifyListUserError(err)
+		}
+		return nil
+	}
+
+	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		if s.BitrixOAuthEnabled() {
+			return errors.New("войдите в Bitrix24 в приложении, чтобы отмечать уведомления")
+		}
+		return errors.New("Bitrix24 не настроен")
+	}
+
+	return s.bitrix.MarkNotificationRead(ctx, notificationID)
+}
+
+func (s *Service) MarkAllBitrixNotificationsReadForMobile(ctx context.Context, oauthSessionID string) error {
+	oauthSessionID = strings.TrimSpace(oauthSessionID)
+
+	if oauthSessionID != "" && s.BitrixOAuthEnabled() {
+		session, err := s.ensureActiveBitrixSession(ctx, oauthSessionID)
+		if err != nil {
+			return err
+		}
+		tokenClient := bitrixclient.NewTokenREST(session.PortalDomain, session.RestEndpoint, session.AccessToken, s.httpClient)
+		if err := tokenClient.MarkAllNotificationsRead(ctx); err != nil {
+			return bitrixclient.NotifyListUserError(err)
+		}
+		return nil
+	}
+
+	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		if s.BitrixOAuthEnabled() {
+			return errors.New("войдите в Bitrix24 в приложении, чтобы отмечать уведомления")
+		}
+		return errors.New("Bitrix24 не настроен")
+	}
+
+	return s.bitrix.MarkAllNotificationsRead(ctx)
+}

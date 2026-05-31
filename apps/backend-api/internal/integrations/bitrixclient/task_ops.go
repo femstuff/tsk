@@ -58,6 +58,7 @@ type BitrixTaskDetail struct {
 	TaskControl      bool              `json:"taskControl,omitempty"`
 	Multitask        bool              `json:"multitask,omitempty"`
 	ForumTopicID     string            `json:"forumTopicId,omitempty"`
+	ChatID           string            `json:"chatId,omitempty"`
 	AvailableActions map[string]bool   `json:"availableActions,omitempty"`
 	Checklist        []BitrixTaskChecklistItem `json:"checklist,omitempty"`
 	Files            []BitrixTaskFile          `json:"files,omitempty"`
@@ -72,7 +73,7 @@ var taskGetSelectFields = []string{
 	"GROUP_ID", "STAGE_ID", "PARENT_ID",
 	"COMMENTS_COUNT", "TIME_ESTIMATE", "DURATION_FACT", "DURATION_PLAN", "DURATION_TYPE",
 	"TAGS", "UF_CRM_TASK", "UF_TASK_WEBDAV_FILES", "FAVORITE",
-	"ALLOW_TIME_TRACKING", "TASK_CONTROL", "MULTITASK", "FORUM_TOPIC_ID", "CHECKLIST",
+	"ALLOW_TIME_TRACKING", "TASK_CONTROL", "MULTITASK", "FORUM_TOPIC_ID", "CHAT", "CHAT_ID", "CHECKLIST",
 }
 
 func personFromMap(m map[string]any) BitrixTaskPerson {
@@ -256,6 +257,7 @@ func mapRowToTaskDetail(row map[string]any) BitrixTaskDetail {
 		TaskControl:       boolFromRow(row, "taskControl", "TASK_CONTROL"),
 		Multitask:         boolFromRow(row, "multitask", "MULTITASK"),
 		ForumTopicID:      fieldFromRow(row, "forumTopicId", "FORUM_TOPIC_ID"),
+		ChatID:            chatIDFromTaskRow(row),
 		AvailableActions:  actionsFromRow(row),
 		Checklist:         checklistFromRow(row),
 		Files:             filesFromTaskRow(row),
@@ -271,6 +273,29 @@ func rowValueCI(row map[string]any, keys ...string) any {
 		}
 	}
 	return nil
+}
+
+func chatIDFromTaskRow(row map[string]any) string {
+	for _, key := range []string{"chatId", "CHAT_ID", "chat_id"} {
+		if v := strings.TrimSpace(fieldFromRow(row, key)); v != "" && v != "<nil>" {
+			return v
+		}
+	}
+	raw := rowValueCI(row, "chat", "CHAT")
+	switch t := raw.(type) {
+	case map[string]any:
+		return fieldFromRow(t, "id", "ID")
+	case float64:
+		return strconv.Itoa(int(t))
+	case int:
+		return strconv.Itoa(t)
+	default:
+		s := strings.TrimSpace(fmt.Sprint(raw))
+		if s == "" || s == "<nil>" {
+			return ""
+		}
+		return s
+	}
 }
 
 func parseTaskGetResult(raw json.RawMessage) (BitrixTaskDetail, error) {
@@ -293,6 +318,14 @@ type bitrixRESTPoster interface {
 	postForm(ctx context.Context, method string, form url.Values) (json.RawMessage, error)
 }
 
+type bitrixRESTJSONPoster interface {
+	postJSON(ctx context.Context, method string, payload any) (json.RawMessage, error)
+}
+
+type bitrixRESTV3Poster interface {
+	postFormV3(ctx context.Context, method string, form url.Values) (json.RawMessage, error)
+}
+
 type webhookREST struct {
 	webhookURL string
 	httpClient *http.Client
@@ -306,6 +339,23 @@ func (w webhookREST) postForm(ctx context.Context, method string, form url.Value
 	return postBitrixForm(ctx, w.httpClient, endpoint, form)
 }
 
+func (w webhookREST) postFormV3(ctx context.Context, method string, form url.Values) (json.RawMessage, error) {
+	if strings.TrimSpace(w.webhookURL) == "" {
+		return nil, fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	base := RestAPIV3Base(w.webhookURL)
+	endpoint := strings.TrimSuffix(base, "/") + "/" + strings.TrimSuffix(method, ".json") + ".json"
+	return postBitrixForm(ctx, w.httpClient, endpoint, form)
+}
+
+func (w webhookREST) postJSON(ctx context.Context, method string, payload any) (json.RawMessage, error) {
+	if strings.TrimSpace(w.webhookURL) == "" {
+		return nil, fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	endpoint := strings.TrimSuffix(w.webhookURL, "/") + "/" + strings.TrimSuffix(method, ".json") + ".json"
+	return postBitrixJSON(ctx, w.httpClient, endpoint, payload)
+}
+
 type tokenRESTPoster struct {
 	token *TokenREST
 }
@@ -315,6 +365,67 @@ func (t tokenRESTPoster) postForm(ctx context.Context, method string, form url.V
 		return nil, fmt.Errorf("bitrix oauth client is not configured")
 	}
 	return postBitrixForm(ctx, t.token.httpClient, t.token.methodURL(method), form)
+}
+
+func (t tokenRESTPoster) postFormV3(ctx context.Context, method string, form url.Values) (json.RawMessage, error) {
+	if !t.token.Configured() {
+		return nil, fmt.Errorf("bitrix oauth client is not configured")
+	}
+	base := RestAPIV3Base(t.token.restBase)
+	method = strings.TrimPrefix(strings.TrimSpace(method), "/")
+	method = strings.TrimSuffix(method, ".json")
+	endpoint := strings.TrimSuffix(base, "/") + "/" + method + ".json?auth=" + url.QueryEscape(t.token.accessToken)
+	return postBitrixForm(ctx, t.token.httpClient, endpoint, form)
+}
+
+func (t tokenRESTPoster) postJSON(ctx context.Context, method string, payload any) (json.RawMessage, error) {
+	if !t.token.Configured() {
+		return nil, fmt.Errorf("bitrix oauth client is not configured")
+	}
+	return postBitrixJSON(ctx, t.token.httpClient, t.token.methodURL(method), payload)
+}
+
+func postBitrixJSON(ctx context.Context, httpClient *http.Client, endpoint string, payload any) (json.RawMessage, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var envelope struct {
+		Result           json.RawMessage `json:"result"`
+		Error            any             `json:"error"`
+		ErrorDescription string          `json:"error_description"`
+	}
+	if len(bytesTrim(respBody)) > 0 {
+		_ = json.Unmarshal(respBody, &envelope)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("bitrix HTTP %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	if envelope.Error != nil || envelope.ErrorDescription != "" {
+		return nil, fmt.Errorf("bitrix error: %v, %s", envelope.Error, strings.TrimSpace(envelope.ErrorDescription))
+	}
+	return envelope.Result, nil
 }
 
 func postBitrixForm(ctx context.Context, httpClient *http.Client, endpoint string, form url.Values) (json.RawMessage, error) {

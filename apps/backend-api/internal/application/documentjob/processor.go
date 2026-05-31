@@ -26,9 +26,12 @@ func NewProcessor(service *Service, logger *slog.Logger, interval time.Duration)
 
 func (p *Processor) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.interval)
+	metricsTicker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	defer metricsTicker.Stop()
 
 	p.processUntilIdle(ctx)
+	p.syncMetrics(ctx)
 
 	for {
 		select {
@@ -36,7 +39,15 @@ func (p *Processor) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			p.processUntilIdle(ctx)
+		case <-metricsTicker.C:
+			p.syncMetrics(ctx)
 		}
+	}
+}
+
+func (p *Processor) syncMetrics(ctx context.Context) {
+	if err := p.service.syncJobStatusMetrics(ctx); err != nil {
+		p.logger.Warn("failed to sync job metrics", "error", err)
 	}
 }
 

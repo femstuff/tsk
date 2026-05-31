@@ -34,7 +34,7 @@ func (s *Service) resolveDealIDForBitrix(ctx context.Context, intent voiceintent
 		return 0, "", steps
 	}
 
-	steps = append(steps, fmt.Sprintf("Поиск сделки по названию (точно): %q", title))
+	steps = append(steps, fmt.Sprintf("Поиск сделки по названию (точно, без учёта регистра): %q", title))
 	found, err := s.bitrix.FindDealIDByTitle(ctx, title)
 	if err == nil && found > 0 {
 		steps = append(steps, fmt.Sprintf("Найдено по точному TITLE, id=%d", found))
@@ -59,17 +59,27 @@ func applyAdminVoiceTextHints(intent *voiceintent.Intent, in AdminVoiceBitrixInp
 	if sh := strings.TrimSpace(in.StageHintText); sh != "" && strings.TrimSpace(intent.StageHint) == "" {
 		intent.StageHint = sh
 	}
+	if in.DealIDOverride > 0 {
+		intent.DealID = in.DealIDOverride
+		return
+	}
+	if dt := strings.TrimSpace(in.DealTitleOverride); dt != "" {
+		intent.DealTitle = dt
+		intent.DealID = 0
+		return
+	}
 	dh := strings.TrimSpace(in.DealHintText)
 	if dh == "" {
 		return
 	}
-	if id, err := strconv.Atoi(dh); err == nil && id > 0 && intent.DealID == 0 && in.DealIDOverride == 0 {
+	if id, err := strconv.Atoi(dh); err == nil && id > 0 {
 		intent.DealID = id
+		intent.DealTitle = ""
 		return
 	}
-	if strings.TrimSpace(intent.DealTitle) == "" && strings.TrimSpace(in.DealTitleOverride) == "" {
-		intent.DealTitle = dh
-	}
+	// Явная подсказка пользователя важнее названия из распознанной речи.
+	intent.DealTitle = dh
+	intent.DealID = 0
 }
 
 // AdminVoiceBitrixInput — загрузка голоса из админки для тестового контура.

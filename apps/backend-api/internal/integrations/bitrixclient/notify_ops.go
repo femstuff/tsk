@@ -159,6 +159,52 @@ func mapNotifyRows(rows []map[string]any) []BitrixNotification {
 	return out
 }
 
+func (c *Client) MarkNotificationRead(ctx context.Context, notificationID string) error {
+	if !c.WebhookConfigured() {
+		return fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	return markNotificationReadVia(ctx, webhookREST{webhookURL: c.webhookURL, httpClient: c.httpClient}, notificationID)
+}
+
+func (c *Client) MarkAllNotificationsRead(ctx context.Context) error {
+	if !c.WebhookConfigured() {
+		return fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	return markAllNotificationsReadVia(ctx, webhookREST{webhookURL: c.webhookURL, httpClient: c.httpClient})
+}
+
+func (t *TokenREST) MarkNotificationRead(ctx context.Context, notificationID string) error {
+	return markNotificationReadVia(ctx, tokenRESTPoster{token: t}, notificationID)
+}
+
+func (t *TokenREST) MarkAllNotificationsRead(ctx context.Context) error {
+	return markAllNotificationsReadVia(ctx, tokenRESTPoster{token: t})
+}
+
+func markNotificationReadVia(ctx context.Context, poster bitrixRESTPoster, notificationID string) error {
+	notificationID = strings.TrimSpace(notificationID)
+	if notificationID == "" {
+		return fmt.Errorf("notification id is required")
+	}
+	form := url.Values{}
+	form.Set("ID", notificationID)
+	form.Set("ACTION", "Y")
+	form.Set("ONLY_CURRENT", "Y")
+	_, err := poster.postForm(ctx, "im.notify.read", form)
+	if err != nil {
+		return fmt.Errorf("im.notify.read: %w", err)
+	}
+	return nil
+}
+
+func markAllNotificationsReadVia(ctx context.Context, poster bitrixRESTPoster) error {
+	_, err := poster.postForm(ctx, "im.notify.read.all", url.Values{})
+	if err != nil {
+		return fmt.Errorf("im.notify.read.all: %w", err)
+	}
+	return nil
+}
+
 func stripHTML(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {

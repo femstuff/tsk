@@ -4,24 +4,20 @@ import { DashboardPageView } from "./DashboardPageView";
 import { useAdminDashboard } from "../features/admin/useAdminDashboard";
 import { useDashboardData } from "../features/dashboard/useDashboardData";
 import { useObservabilityMetrics } from "../features/observability/useObservabilityMetrics";
-import type { AdminVoiceBitrixResult } from "../entities/document-job/types";
 import {
   buildDocumentsTrend,
-  buildJobStatusDonut,
   bitrixTaskDonut,
   countWithinDays,
   deriveMetrics,
-  deriveSystemLoad,
   type NavSection
 } from "../lib/dashboardAnalytics";
 import {
   formatPrometheusMetrics,
   formatUptime,
   prometheusHttpSeries,
-  prometheusJobDonut,
   prometheusSystemLoad
 } from "../lib/observabilityFormat";
-import { getApiBaseUrl, runAdminVoiceBitrixPipeline } from "../shared/api/client";
+import { getApiBaseUrl } from "../shared/api/client";
 
 const STATUS_LABELS: Record<string, string> = {
   queued: "В очереди",
@@ -106,14 +102,6 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   "bitrix.oauth.connected": "Авторизация Bitrix24"
 };
 
-const VOICE_ACTION_LABELS: Record<string, string> = {
-  none: "Не определено",
-  move_next: "Следующая стадия сделки",
-  move_prev: "Предыдущая стадия",
-  move_stage: "Переход на стадию",
-  create_task: "Создать задачу"
-};
-
 const TEMPLATE_NAME_LABELS: Record<string, string> = {
   "Service Brief": "Служебное резюме",
   "Sales Follow-up": "Повторное коммерческое предложение",
@@ -167,7 +155,7 @@ const HEALTH_STATUS_LABELS: Record<string, string> = {
   loading: "Загрузка"
 };
 
-const EVENTS_PAGE_SIZE = 5;
+const EVENTS_PAGE_SIZE = 20;
 
 function translateFromMap(value: string, labels: Record<string, string>) {
   return labels[value] ?? value;
@@ -308,32 +296,18 @@ export function DashboardPage() {
     deliveryAddress: ""
   });
   const [jobStatusDrafts, setJobStatusDrafts] = useState<Record<string, string>>({});
-  const [voiceForm, setVoiceForm] = useState({
-    templateId: "",
-    sourceName: "",
-    dealId: "",
-    dealTitle: "",
-    dealHint: "",
-    stageHint: ""
-  });
-  const [voiceFile, setVoiceFile] = useState<File | null>(null);
-  const [voiceBusy, setVoiceBusy] = useState(false);
-  const [voiceResult, setVoiceResult] = useState<AdminVoiceBitrixResult | null>(null);
-  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [eventsPage, setEventsPage] = useState(0);
-  const [activeSection, setActiveSection] = useState<NavSection>("dashboard");
+  const [activeSection, setActiveSection] = useState<NavSection>("overview");
 
   const apiBaseUrl = getApiBaseUrl();
+  const prometheusUrl = import.meta.env.VITE_PROMETHEUS_URL ?? "http://localhost:9090";
+  const grafanaUrl = import.meta.env.VITE_GRAFANA_URL ?? "http://localhost:3000";
 
   const documentsTrend = useMemo(() => buildDocumentsTrend(jobs), [jobs]);
-  const fallbackJobDonut = useMemo(() => buildJobStatusDonut(jobs), [jobs]);
-  const prometheusDonut = useMemo(() => prometheusJobDonut(observability), [observability]);
-  const bitrixDonut = useMemo(
+  const bitrixTaskDonutSlices = useMemo(
     () => (adminDashboard ? bitrixTaskDonut(adminDashboard.bitrixTasks) : []),
     [adminDashboard]
   );
-  const jobStatusDonut =
-    bitrixDonut.length > 0 ? bitrixDonut : prometheusDonut.length > 0 ? prometheusDonut : fallbackJobDonut;
   const dashboardMetrics = useMemo(
     () =>
       observability?.available
@@ -343,26 +317,22 @@ export function DashboardPage() {
   );
   const httpRateSeries = useMemo(() => prometheusHttpSeries(observability), [observability]);
   const prometheusLoad = useMemo(() => prometheusSystemLoad(observability), [observability]);
-  const systemLoad = useMemo(() => {
+  const uptimeLabel = useMemo(() => {
     const healthUptime = health?.uptimeSeconds ?? 0;
     const promUptime = observability?.uptimeSeconds ?? 0;
-    const uptimeSeconds = Math.max(healthUptime, promUptime);
-
-    if (prometheusLoad) {
-      return {
-        cpu: prometheusLoad.cpu,
-        memory: prometheusLoad.memory,
-        memoryLabel: prometheusLoad.memoryGb,
-        uptimeLabel: formatUptime(uptimeSeconds)
-      };
+    return formatUptime(Math.max(healthUptime, promUptime));
+  }, [health?.uptimeSeconds, observability?.uptimeSeconds]);
+  const systemLoad = useMemo(() => {
+    if (!prometheusLoad) {
+      return null;
     }
+
     return {
-      cpu: deriveSystemLoad(summary).cpu,
-      memory: deriveSystemLoad(summary).memory,
-      memoryLabel: "—",
-      uptimeLabel: formatUptime(uptimeSeconds)
+      cpu: prometheusLoad.cpu,
+      memory: prometheusLoad.memory,
+      memoryLabel: prometheusLoad.memoryGb
     };
-  }, [health?.uptimeSeconds, observability?.uptimeSeconds, prometheusLoad, summary]);
+  }, [prometheusLoad]);
   const metricsSource = observability?.available ? "Prometheus · live" : "Health endpoint";
   const formatAuthTime = (value: string) => formatDate(value);
 
@@ -443,48 +413,6 @@ export function DashboardPage() {
     }));
   };
 
-  const handleVoicePipelineSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setVoiceError(null);
-    if (!voiceFile) {
-      setVoiceError("Выберите аудиофайл.");
-      return;
-    }
-
-    setVoiceBusy(true);
-    try {
-      const formData = new FormData();
-      formData.set("audio", voiceFile);
-      if (voiceForm.templateId.trim() !== "") {
-        formData.set("templateId", voiceForm.templateId.trim());
-      }
-      if (voiceForm.sourceName.trim() !== "") {
-        formData.set("sourceName", voiceForm.sourceName.trim());
-      }
-      if (voiceForm.dealId.trim() !== "") {
-        formData.set("dealId", voiceForm.dealId.trim());
-      }
-      if (voiceForm.dealTitle.trim() !== "") {
-        formData.set("dealTitle", voiceForm.dealTitle.trim());
-      }
-      if (voiceForm.dealHint.trim() !== "") {
-        formData.set("dealHint", voiceForm.dealHint.trim());
-      }
-      if (voiceForm.stageHint.trim() !== "") {
-        formData.set("stageHint", voiceForm.stageHint.trim());
-      }
-
-      const item = await runAdminVoiceBitrixPipeline(formData);
-      setVoiceResult(item);
-      await refresh();
-    } catch (err) {
-      setVoiceResult(null);
-      setVoiceError(err instanceof Error ? err.message : "Не удалось выполнить цепочку");
-    } finally {
-      setVoiceBusy(false);
-    }
-  };
-
   return (
     <DashboardPageView
       activeSection={activeSection}
@@ -497,29 +425,22 @@ export function DashboardPage() {
         documentsTotal: summary.documentCount,
         documentsWeekDelta: countWithinDays(documents, 7),
         tasksTotal: adminDashboard?.bitrixTasks.total ?? 0,
-        tasksWeekDelta: 0,
         tasksLabel: adminDashboard
           ? `${adminDashboard.bitrixTasks.totalOpen} открыто · ${adminDashboard.bitrixTasks.inProgress} в работе`
           : "загрузка…",
         usersTotal: adminDashboard?.authorizedUsers ?? 0,
-        usersWeekDelta: 0,
-        usersLabel: "в Bitrix24 (OAuth)",
+        usersLabel: "OAuth-сессий",
         activityToday: adminDashboard?.voiceActivityToday ?? 0,
         activityLabel: adminDashboard
-          ? `${adminDashboard.voiceActivityWeek} за 7 дней (голос + Bitrix)`
-          : "голосовых действий",
+          ? `${adminDashboard.voiceActivityWeek} за 7 дней`
+          : "действий",
         documentsTrend,
-        jobStatusDonut,
-        bitrixTaskItems: adminDashboard?.bitrixTaskItems ?? [],
-        formatTaskDeadline: (value) => (value?.trim() ? formatDate(value) : "—"),
         httpRateSeries,
-        metrics: dashboardMetrics,
-        systemLoad,
-        metricsSource,
-        observabilityError: observabilityError ?? adminDashboardError,
         recentAuth: adminDashboard?.recentAuth ?? [],
         formatAuthTime
       }}
+      bitrixTaskDonut={bitrixTaskDonutSlices}
+      bitrixTaskItems={adminDashboard?.bitrixTaskItems ?? []}
       templates={templates}
       jobs={jobs}
       documents={documents}
@@ -532,6 +453,12 @@ export function DashboardPage() {
       setEventsPage={setEventsPage}
       health={health}
       dashboardMetrics={dashboardMetrics}
+      systemLoad={systemLoad}
+      uptimeLabel={uptimeLabel}
+      metricsSource={metricsSource}
+      observabilityError={observabilityError ?? null}
+      prometheusUrl={prometheusUrl}
+      grafanaUrl={grafanaUrl}
       authorizedUsers={adminDashboard?.users ?? []}
       apiBaseUrl={apiBaseUrl}
       templateForm={templateForm}
@@ -551,14 +478,6 @@ export function DashboardPage() {
       setJobStatusDrafts={setJobStatusDrafts}
       updatingJobId={updatingJobId}
       onChangeJobStatus={(jobId, status) => void changeJobStatus(jobId, status)}
-      voiceForm={voiceForm}
-      setVoiceForm={setVoiceForm}
-      voiceFile={voiceFile}
-      setVoiceFile={setVoiceFile}
-      voiceBusy={voiceBusy}
-      voiceResult={voiceResult}
-      voiceError={voiceError}
-      onVoicePipelineSubmit={handleVoicePipelineSubmit}
       translateTemplateName={translateTemplateName}
       translateTemplateDescription={translateTemplateDescription}
       translateFromMap={translateFromMap}
@@ -582,8 +501,7 @@ export function DashboardPage() {
         integrationMode: INTEGRATION_MODE_LABELS,
         eventLevel: EVENT_LEVEL_LABELS,
         eventType: EVENT_TYPE_LABELS,
-        healthStatus: HEALTH_STATUS_LABELS,
-        voiceAction: VOICE_ACTION_LABELS
+        healthStatus: HEALTH_STATUS_LABELS
       }}
       eventsPageSize={EVENTS_PAGE_SIZE}
     />

@@ -41,6 +41,25 @@ func TestParseTaskCommentsResult(t *testing.T) {
 	}
 }
 
+func TestParseBitrixTaskIDInt(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]int{
+		"8017":    8017,
+		" 123 ":   123,
+		"8017.0":  8017,
+	}
+	for raw, want := range cases {
+		got, err := parseBitrixTaskIDInt(raw)
+		if err != nil {
+			t.Fatalf("parseBitrixTaskIDInt(%q): %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("parseBitrixTaskIDInt(%q) = %d, want %d", raw, got, want)
+		}
+	}
+}
+
 func TestAbsolutizeBitrixURL(t *testing.T) {
 	t.Parallel()
 

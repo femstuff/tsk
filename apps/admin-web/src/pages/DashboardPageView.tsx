@@ -1,16 +1,33 @@
-import type { FormEvent, ReactNode } from "react";
+import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 
+import { DonutChart } from "../components/charts/DonutChart";
 import { DashboardOverview } from "../components/dashboard/DashboardOverview";
 import { AdminShell } from "../components/layout/AdminShell";
+import { SectionTabs } from "../components/ui/SectionTabs";
 import type { AdminBitrixUser } from "../entities/admin/types";
-import type { AdminVoiceBitrixResult, DocumentJob, DocumentTemplate, GeneratedDocument, HealthResponse, ProcessingEvent, SourceDocument, TaskCommand } from "../entities/document-job/types";
-import type { NavSection } from "../lib/dashboardAnalytics";
+import type {
+  DocumentJob,
+  DocumentTemplate,
+  GeneratedDocument,
+  HealthResponse,
+  ProcessingEvent,
+  SourceDocument,
+  TaskCommand
+} from "../entities/document-job/types";
+import {
+  filterBitrixTasksByKey,
+  type DonutSlice,
+  type NavSection
+} from "../lib/dashboardAnalytics";
 
 type IntegrationItem = {
   name: string;
   status: string;
   tone: "ok" | "warn" | "muted";
 };
+
+type JobsTab = "queue" | "templates" | "files" | "create";
+type EventsTab = "events" | "commands";
 
 type DashboardPageViewProps = {
   activeSection: NavSection;
@@ -20,6 +37,8 @@ type DashboardPageViewProps = {
   error: string | null;
   integrations: IntegrationItem[];
   overviewProps: React.ComponentProps<typeof DashboardOverview>;
+  bitrixTaskDonut: DonutSlice[];
+  bitrixTaskItems: import("../entities/admin/types").AdminBitrixTaskItem[];
   templates: DocumentTemplate[];
   jobs: DocumentJob[];
   documents: GeneratedDocument[];
@@ -37,6 +56,16 @@ type DashboardPageViewProps = {
     latency: string;
     availability: string;
   };
+  systemLoad: {
+    cpu: number;
+    memory: number;
+    memoryLabel: string;
+  } | null;
+  uptimeLabel: string;
+  metricsSource: string;
+  observabilityError: string | null;
+  prometheusUrl: string;
+  grafanaUrl: string;
   authorizedUsers: AdminBitrixUser[];
   apiBaseUrl: string;
   templateForm: {
@@ -84,30 +113,6 @@ type DashboardPageViewProps = {
   setJobStatusDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   updatingJobId: string | null;
   onChangeJobStatus: (jobId: string, status: string) => void;
-  voiceForm: {
-    templateId: string;
-    sourceName: string;
-    dealId: string;
-    dealTitle: string;
-    dealHint: string;
-    stageHint: string;
-  };
-  setVoiceForm: React.Dispatch<
-    React.SetStateAction<{
-      templateId: string;
-      sourceName: string;
-      dealId: string;
-      dealTitle: string;
-      dealHint: string;
-      stageHint: string;
-    }>
-  >;
-  voiceFile: File | null;
-  setVoiceFile: (file: File | null) => void;
-  voiceBusy: boolean;
-  voiceResult: AdminVoiceBitrixResult | null;
-  voiceError: string | null;
-  onVoicePipelineSubmit: (event: FormEvent<HTMLFormElement>) => void;
   translateTemplateName: (value: string) => string;
   translateTemplateDescription: (value: string) => string;
   translateFromMap: (value: string, labels: Record<string, string>) => string;
@@ -132,7 +137,6 @@ type DashboardPageViewProps = {
     eventLevel: Record<string, string>;
     eventType: Record<string, string>;
     healthStatus: Record<string, string>;
-    voiceAction: Record<string, string>;
   };
   eventsPageSize: number;
 };
@@ -144,6 +148,37 @@ function Section({ visible, children }: { visible: boolean; children: ReactNode 
   return <>{children}</>;
 }
 
+function MetricBar({
+  label,
+  value,
+  suffix = "%",
+  detail
+}: {
+  label: string;
+  value: number | string;
+  suffix?: string;
+  detail?: string;
+}) {
+  const numeric = typeof value === "number" ? value : 0;
+  return (
+    <div className="metric-bar">
+      <div className="metric-bar-head">
+        <span>{label}</span>
+        <strong>
+          {value}
+          {typeof value === "number" ? suffix : ""}
+        </strong>
+      </div>
+      {typeof value === "number" ? (
+        <div className="metric-bar-track">
+          <div className="metric-bar-fill" style={{ width: `${Math.min(100, numeric)}%` }} />
+        </div>
+      ) : null}
+      {detail ? <p className="metric-bar-detail">{detail}</p> : null}
+    </div>
+  );
+}
+
 export function DashboardPageView(props: DashboardPageViewProps) {
   const {
     activeSection,
@@ -152,8 +187,29 @@ export function DashboardPageView(props: DashboardPageViewProps) {
     loading,
     error,
     integrations,
-    overviewProps
+    overviewProps,
+    bitrixTaskDonut,
+    bitrixTaskItems
   } = props;
+
+  const [jobsTab, setJobsTab] = useState<JobsTab>("queue");
+  const [eventsTab, setEventsTab] = useState<EventsTab>("events");
+  const [bitrixFilterKey, setBitrixFilterKey] = useState<string | null>(null);
+
+  const selectedSlice = bitrixTaskDonut.find((slice) => slice.filterKey === bitrixFilterKey);
+  const filteredBitrixTasks = useMemo(
+    () => (bitrixFilterKey ? filterBitrixTasksByKey(bitrixTaskItems, bitrixFilterKey) : []),
+    [bitrixFilterKey, bitrixTaskItems]
+  );
+
+  const recentEvents = props.events.slice(0, 5);
+
+  const handleBitrixSliceSelect = (slice: DonutSlice) => {
+    if (!slice.filterKey) {
+      return;
+    }
+    setBitrixFilterKey((current) => (current === slice.filterKey ? null : slice.filterKey ?? null));
+  };
 
   return (
     <AdminShell
@@ -164,124 +220,163 @@ export function DashboardPageView(props: DashboardPageViewProps) {
       integrations={integrations}
     >
       {error ? <p className="banner error">{error}</p> : null}
+      {props.observabilityError ? <p className="banner warn">{props.observabilityError}</p> : null}
 
-      <Section visible={activeSection === "dashboard"}>
-        <DashboardOverview {...overviewProps} />
-      </Section>
+      <Section visible={activeSection === "overview"}>
+        <DashboardOverview
+          {...overviewProps}
+          onNavigateBitrix={() => onNavigate("bitrix")}
+          onNavigateJobs={() => onNavigate("jobs")}
+        />
 
-      <Section visible={activeSection === "templates"}>
-        <section className="content-grid two-columns">
-          <article className="panel">
-            <div className="panel-header">
-              <h2>Загрузка шаблона</h2>
-              <span>Постоянное хранилище шаблонов</span>
-            </div>
-            <form className="form-grid" onSubmit={(event) => void props.onTemplateSubmit(event)}>
-              <label>
-                Название
-                <input
-                  value={props.templateForm.name}
-                  onChange={(event) =>
-                    props.setTemplateForm((current) => ({ ...current, name: event.target.value }))
-                  }
-                />
-              </label>
-              <label>
-                Категория
-                <input
-                  value={props.templateForm.category}
-                  onChange={(event) =>
-                    props.setTemplateForm((current) => ({
-                      ...current,
-                      category: event.target.value
-                    }))
-                  }
-                />
-              </label>
-              <label>
-                Версия
-                <input
-                  value={props.templateForm.version}
-                  onChange={(event) =>
-                    props.setTemplateForm((current) => ({
-                      ...current,
-                      version: event.target.value
-                    }))
-                  }
-                />
-              </label>
-              <label className="full-width">
-                Описание
-                <textarea
-                  value={props.templateForm.description}
-                  onChange={(event) =>
-                    props.setTemplateForm((current) => ({
-                      ...current,
-                      description: event.target.value
-                    }))
-                  }
-                />
-              </label>
-              <label className="full-width">
-                Файл шаблона
-                <input
-                  type="file"
-                  onChange={(event) => props.setTemplateFile(event.target.files?.[0] ?? null)}
-                />
-              </label>
-              <div className="form-actions full-width">
-                <button
-                  className="primary"
-                  type="submit"
-                  disabled={!props.readyToSubmitTemplate || props.creatingTemplate}
-                >
-                  {props.creatingTemplate ? "Загрузка..." : "Загрузить шаблон"}
-                </button>
-              </div>
-            </form>
-          </article>
-
-          <article className="panel">
-            <div className="panel-header">
-              <h2>Шаблоны документов</h2>
-              <span>{props.templates.length} доступно</span>
-            </div>
-            <div className="list">
-              {props.templates.map((template) => (
-                <div className="list-item" key={template.id}>
-                  <div>
-                    <strong>{props.translateTemplateName(template.name)}</strong>
-                    <p>{props.translateTemplateDescription(template.description)}</p>
-                    <p className="subtle">
-                      {template.fileName} · {props.formatBytes(template.sizeBytes)} KB
-                    </p>
-                  </div>
-                  <div className="meta">
-                    <span>{props.translateFromMap(template.category, props.labels.category)}</span>
-                    <span>{template.version}</span>
-                    <a
-                      href={`${props.apiBaseUrl}/api/v1/document-templates/${template.id}/download`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Скачать
-                    </a>
+        <article className="panel overview-recent-events">
+          <div className="panel-header">
+            <h2>Последние события</h2>
+            <button type="button" className="link-button" onClick={() => onNavigate("events")}>
+              Весь журнал →
+            </button>
+          </div>
+          <div className="list compact-list">
+            {recentEvents.length === 0 ? (
+              <p className="empty">Событий пока нет.</p>
+            ) : (
+              recentEvents.map((event) => (
+                <div className="list-item stacked" key={event.id}>
+                  <div className="list-topline">
+                    <div>
+                      <strong>{props.translateMessage(event.message)}</strong>
+                      <p className="subtle">
+                        {props.translateFromMap(event.eventType, props.labels.eventType)}
+                      </p>
+                    </div>
+                    <div className="meta">
+                      <span className={props.statusClass(event.level)}>
+                        {props.translateFromMap(event.level, props.labels.eventLevel)}
+                      </span>
+                      <span>{props.formatDate(event.createdAt)}</span>
+                    </div>
                   </div>
                 </div>
+              ))
+            )}
+          </div>
+        </article>
+      </Section>
+
+      <Section visible={activeSection === "bitrix"}>
+        <section className="dashboard-grid two-up">
+          <article className="panel-card">
+            <div className="panel-card-head">
+              <h2>Задачи Bitrix24</h2>
+              <span>{bitrixTaskItems.length} в выборке · клик по сегменту</span>
+            </div>
+            {bitrixTaskDonut.length > 0 ? (
+              <DonutChart
+                slices={bitrixTaskDonut}
+                selectedFilterKey={bitrixFilterKey}
+                onSliceSelect={handleBitrixSliceSelect}
+              />
+            ) : (
+              <p className="empty">Нет данных о задачах. Подключите Bitrix24 через мобильное приложение.</p>
+            )}
+            {bitrixFilterKey && selectedSlice ? (
+              <div className="bitrix-task-filter-panel">
+                <div className="bitrix-task-filter-head">
+                  <strong>{selectedSlice.label}</strong>
+                  <span>{filteredBitrixTasks.length} задач</span>
+                  <button
+                    type="button"
+                    className="bitrix-task-filter-clear"
+                    onClick={() => setBitrixFilterKey(null)}
+                  >
+                    Сбросить
+                  </button>
+                </div>
+                {filteredBitrixTasks.length === 0 ? (
+                  <p className="activity-empty">Нет задач с этим статусом.</p>
+                ) : (
+                  <ul className="bitrix-task-list">
+                    {filteredBitrixTasks.map((task) => (
+                      <li key={task.id} className="bitrix-task-item">
+                        <div>
+                          <strong>{task.title || `Задача #${task.id}`}</strong>
+                          <p className="subtle">ID {task.id}</p>
+                        </div>
+                        <div className="bitrix-task-meta">
+                          <span className="status-pill">{task.statusLabel}</span>
+                          <span>{task.deadline?.trim() ? props.formatDate(task.deadline) : "—"}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : null}
+          </article>
+
+          <article className="panel-card">
+            <div className="panel-card-head">
+              <h2>Подключённые пользователи</h2>
+              <span>{props.authorizedUsers.length} OAuth-сессий</span>
+            </div>
+            <div className="user-grid compact-user-grid">
+              {props.authorizedUsers.map((user) => (
+                <details className="user-card" key={user.sessionId}>
+                  <summary className="user-card-summary">
+                    <div>
+                      <strong>{user.userName || `id ${user.bitrixUserId}`}</strong>
+                      <p className="subtle">{user.portalDomain}</p>
+                    </div>
+                    <span className="user-card-meta">{user.taskCount} задач</span>
+                  </summary>
+                  <dl className="user-details">
+                    <div>
+                      <dt>Bitrix ID</dt>
+                      <dd>{user.bitrixUserId}</dd>
+                    </div>
+                    <div>
+                      <dt>Scopes</dt>
+                      <dd>{user.oauthScopes || "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>Подключён</dt>
+                      <dd>{props.formatDate(user.connectedAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>Активность</dt>
+                      <dd>{props.formatDate(user.lastActiveAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>Токен до</dt>
+                      <dd>{props.formatDate(user.expiresAt ?? null)}</dd>
+                    </div>
+                  </dl>
+                </details>
               ))}
-              {!loading && props.templates.length === 0 ? (
-                <p className="empty">Загрузите первый шаблон, чтобы создавать заявки.</p>
+              {!loading && props.authorizedUsers.length === 0 ? (
+                <p className="empty">Пользователи появятся после входа в мобильном приложении.</p>
               ) : null}
             </div>
           </article>
         </section>
       </Section>
 
-      <Section visible={activeSection === "documents"}>
-        <section className="content-grid two-columns">
+      <Section visible={activeSection === "jobs"}>
+        <SectionTabs
+          active={jobsTab}
+          onChange={setJobsTab}
+          items={[
+            { id: "queue", label: "Заявки", count: props.jobs.length },
+            { id: "templates", label: "Шаблоны", count: props.templates.length },
+            { id: "files", label: "Файлы", count: props.documents.length + props.sourceDocuments.length },
+            { id: "create", label: "Новая заявка" }
+          ]}
+        />
+
+        {jobsTab === "queue" ? (
           <article className="panel">
             <div className="panel-header">
-              <h2>Заявки на документы</h2>
+              <h2>Очередь заявок</h2>
               <span>{props.jobs.length} всего</span>
             </div>
             <div className="list">
@@ -301,16 +396,13 @@ export function DashboardPageView(props: DashboardPageViewProps) {
                   </div>
                   <div className="job-details">
                     <span>
-                      Инициатор:{" "}
-                      {props.translateFromMap(job.requestedBy, props.labels.requestedBy)}
+                      Инициатор: {props.translateFromMap(job.requestedBy, props.labels.requestedBy)}
                     </span>
                     <span>
-                      Доставка:{" "}
-                      {props.translateFromMap(job.deliveryChannel, props.labels.deliveryChannel)}
+                      Доставка: {props.translateFromMap(job.deliveryChannel, props.labels.deliveryChannel)}
                     </span>
                     <span>
-                      Статус отправки:{" "}
-                      {props.translateFromMap(job.dispatchStatus, props.labels.dispatchStatus)}
+                      Отправка: {props.translateFromMap(job.dispatchStatus, props.labels.dispatchStatus)}
                     </span>
                     <span>Завершено: {props.formatDate(job.completedAt)}</span>
                     {job.errorMessage ? (
@@ -343,326 +435,193 @@ export function DashboardPageView(props: DashboardPageViewProps) {
                       }
                       disabled={props.updatingJobId === job.id}
                     >
-                      {props.updatingJobId === job.id ? "Обновляем..." : "Применить статус"}
+                      {props.updatingJobId === job.id ? "Обновляем…" : "Применить"}
                     </button>
                   </div>
                 </div>
               ))}
               {!loading && props.jobs.length === 0 ? (
-                <p className="empty">Создайте первую заявку, чтобы проверить генерацию.</p>
+                <p className="empty">Создайте заявку во вкладке «Новая заявка».</p>
               ) : null}
             </div>
           </article>
+        ) : null}
 
-          <article className="panel">
-            <div className="panel-header">
-              <h2>Исходные документы</h2>
-              <span>{props.sourceDocuments.length} сохранённых загрузок</span>
-            </div>
-            <div className="list">
-              {props.sourceDocuments.map((document) => (
-                <div className="list-item" key={document.id}>
-                  <div>
-                    <strong>{document.fileName}</strong>
-                    <p>{props.translateFromMap(document.origin, props.labels.origin)}</p>
-                    <p className="subtle">
-                      {props.translateFromMap(document.kind, props.labels.sourceDocumentKind)} ·
-                      заявка {document.jobId ?? "-"} · {props.formatBytes(document.sizeBytes)} KB
-                    </p>
-                  </div>
-                  <div className="meta">
-                    <span>{props.formatDate(document.createdAt)}</span>
-                    <a
-                      href={`${props.apiBaseUrl}/api/v1/source-documents/${document.id}/download`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Скачать
-                    </a>
-                  </div>
-                </div>
-              ))}
-              {!loading && props.sourceDocuments.length === 0 ? (
-                <p className="empty">
-                  Здесь появятся загрузки из мобильного приложения и аудиофайлы.
-                </p>
-              ) : null}
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel-header">
-              <h2>Сгенерированные документы</h2>
-              <span>{props.documents.length} сохранённых файлов</span>
-            </div>
-            <div className="list">
-              {props.documents.map((document) => (
-                <div className="list-item" key={document.id}>
-                  <div>
-                    <strong>{document.fileName}</strong>
-                    <p>{props.translateTemplateName(document.templateName)}</p>
-                    <p className="subtle">
-                      Заявка: {document.jobId} · {props.formatBytes(document.sizeBytes)} KB
-                    </p>
-                  </div>
-                  <div className="meta">
-                    <span>{props.formatDate(document.createdAt)}</span>
-                    <a
-                      href={`${props.apiBaseUrl}/api/v1/generated-documents/${document.id}/download`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Скачать
-                    </a>
-                  </div>
-                </div>
-              ))}
-              {!loading && props.documents.length === 0 ? (
-                <p className="empty">После обработки здесь появятся сгенерированные документы.</p>
-              ) : null}
-            </div>
-          </article>
-        </section>
-      </Section>
-
-      <Section visible={activeSection === "tasks"}>
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Команды backend</h2>
-            <span>{props.taskCommands.length} зарегистрировано</span>
-          </div>
-          <p className="subtle panel-intro">
-            Запросы и действия, которые приходят на API и выполняются системой (Bitrix, email и др.) — не задачи Bitrix24.
-          </p>
-          <div className="list">
-            {props.taskCommands.map((command) => (
-              <div className="list-item stacked" key={command.id}>
-                <div className="list-topline">
-                  <div>
-                    <strong>
-                      {props.translateFromMap(command.targetSystem, props.labels.taskTarget)}
-                    </strong>
-                    <p>{props.translateCommandText(command.commandText)}</p>
-                  </div>
-                  <div className="meta">
-                    <span className={props.statusClass(command.status)}>
-                      {props.translateFromMap(command.status, props.labels.taskCommandStatus)}
-                    </span>
-                    <span>{props.formatDate(command.createdAt)}</span>
-                  </div>
-                </div>
-                <p className="subtle">
-                  {props.translateFromMap(command.integrationMode, props.labels.integrationMode)} ·{" "}
-                  {props.translateResultMessage(command.resultMessage)}
-                </p>
+        {jobsTab === "templates" ? (
+          <section className="content-grid two-columns">
+            <article className="panel">
+              <div className="panel-header">
+                <h2>Загрузить шаблон</h2>
               </div>
-            ))}
-            {!loading && props.taskCommands.length === 0 ? (
-              <p className="empty">Здесь появятся команды для Битрикс и email-согласования.</p>
-            ) : null}
-          </div>
-        </article>
-      </Section>
-
-      <Section visible={activeSection === "users"}>
-        <section className="user-grid">
-          {props.authorizedUsers.map((user) => (
-            <details className="user-card" key={user.sessionId}>
-              <summary className="user-card-summary">
-                <div>
-                  <strong>{user.userName || `id ${user.bitrixUserId}`}</strong>
-                  <p className="subtle">Bitrix ID {user.bitrixUserId}</p>
+              <form className="form-grid" onSubmit={(event) => void props.onTemplateSubmit(event)}>
+                <label>
+                  Название
+                  <input
+                    value={props.templateForm.name}
+                    onChange={(event) =>
+                      props.setTemplateForm((current) => ({ ...current, name: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  Категория
+                  <input
+                    value={props.templateForm.category}
+                    onChange={(event) =>
+                      props.setTemplateForm((current) => ({ ...current, category: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  Версия
+                  <input
+                    value={props.templateForm.version}
+                    onChange={(event) =>
+                      props.setTemplateForm((current) => ({ ...current, version: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="full-width">
+                  Описание
+                  <textarea
+                    value={props.templateForm.description}
+                    onChange={(event) =>
+                      props.setTemplateForm((current) => ({
+                        ...current,
+                        description: event.target.value
+                      }))
+                    }
+                  />
+                </label>
+                <label className="full-width">
+                  Файл
+                  <input
+                    type="file"
+                    onChange={(event) => props.setTemplateFile(event.target.files?.[0] ?? null)}
+                  />
+                </label>
+                <div className="form-actions full-width">
+                  <button
+                    className="primary"
+                    type="submit"
+                    disabled={!props.readyToSubmitTemplate || props.creatingTemplate}
+                  >
+                    {props.creatingTemplate ? "Загрузка…" : "Загрузить"}
+                  </button>
                 </div>
-                <span className="user-card-meta">{user.taskCount} задач</span>
-              </summary>
-              <dl className="user-details">
-                <div>
-                  <dt>ID сессии</dt>
-                  <dd>{user.sessionId}</dd>
-                </div>
-                <div>
-                  <dt>Bitrix user ID</dt>
-                  <dd>{user.bitrixUserId}</dd>
-                </div>
-                <div>
-                  <dt>Имя</dt>
-                  <dd>{user.userName || "—"}</dd>
-                </div>
-                <div>
-                  <dt>Портал</dt>
-                  <dd>{user.portalDomain}</dd>
-                </div>
-                <div>
-                  <dt>OAuth scopes</dt>
-                  <dd>{user.oauthScopes || "—"}</dd>
-                </div>
-                <div>
-                  <dt>Задач в Bitrix</dt>
-                  <dd>{user.taskCount}</dd>
-                </div>
-                <div>
-                  <dt>Статус</dt>
-                  <dd>{user.status === "active" ? "Активна" : user.status}</dd>
-                </div>
-                <div>
-                  <dt>Подключён</dt>
-                  <dd>{props.formatDate(user.connectedAt)}</dd>
-                </div>
-                <div>
-                  <dt>Последняя активность</dt>
-                  <dd>{props.formatDate(user.lastActiveAt)}</dd>
-                </div>
-                <div>
-                  <dt>Токен истекает</dt>
-                  <dd>{props.formatDate(user.expiresAt ?? null)}</dd>
-                </div>
-              </dl>
-            </details>
-          ))}
-          {!loading && props.authorizedUsers.length === 0 ? (
-            <p className="empty">Авторизованные пользователи Bitrix24 появятся после входа в мобильном приложении.</p>
-          ) : null}
-        </section>
-      </Section>
-
-      <Section visible={activeSection === "activity"}>
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Журнал событий</h2>
-            <span>
-              {props.events.length} всего · страница {props.safeEventsPage + 1} из{" "}
-              {props.eventsPageCount}
-            </span>
-          </div>
-          <div className="list">
-            {props.visibleEvents.map((event) => (
-              <div className="list-item stacked" key={event.id}>
-                <div className="list-topline">
-                  <div>
-                    <strong>{props.translateMessage(event.message)}</strong>
-                    <p>{props.translateFromMap(event.eventType, props.labels.eventType)}</p>
-                  </div>
-                  <div className="meta">
-                    <span className={props.statusClass(event.level)}>
-                      {props.translateFromMap(event.level, props.labels.eventLevel)}
-                    </span>
-                    <span>{props.formatDate(event.createdAt)}</span>
-                  </div>
-                </div>
-                <p className="subtle">{props.formatEventDetails(event.details || "")}</p>
-              </div>
-            ))}
-            {!loading && props.events.length === 0 ? (
-              <p className="empty">Здесь появятся системные события и события заявок.</p>
-            ) : null}
-          </div>
-          {props.events.length > props.eventsPageSize ? (
-            <div className="list-pagination">
-              <button
-                type="button"
-                disabled={props.safeEventsPage <= 0}
-                onClick={() => props.setEventsPage((page) => Math.max(0, page - 1))}
-              >
-                Назад
-              </button>
-              <span className="subtle">
-                {props.safeEventsPage * props.eventsPageSize + 1}–
-                {Math.min((props.safeEventsPage + 1) * props.eventsPageSize, props.events.length)}{" "}
-                из {props.events.length}
-              </span>
-              <button
-                type="button"
-                disabled={props.safeEventsPage >= props.eventsPageCount - 1}
-                onClick={() =>
-                  props.setEventsPage((page) => Math.min(props.eventsPageCount - 1, page + 1))
-                }
-              >
-                Вперёд
-              </button>
-            </div>
-          ) : null}
-        </article>
-      </Section>
-
-      <Section visible={activeSection === "metrics"}>
-        <section className="content-grid two-columns">
-          <article className="panel">
-            <div className="panel-header">
-              <h2>Статус backend</h2>
-              <span>{props.health?.service ?? "—"}</span>
-            </div>
-            <p className="metric">
-              {props.translateFromMap(props.health?.status ?? "loading", props.labels.healthStatus)}
-            </p>
-            <p>Среда: {props.health?.environment ?? "-"}</p>
-            <p>База данных: {props.health?.database ?? "-"}</p>
-            <p>Продуктовых API-запросов: {props.health?.productRequestsTotal ?? 0}</p>
-            <p>Ошибок: {props.health?.errorsTotal ?? 0}</p>
-            <p>Заявок создано: {props.health?.jobsCreatedTotal ?? 0}</p>
-            <p className="subtle">
-              Сырой HTTP total: {props.health?.httpRequestsTotalRaw ?? 0} · uptime:{" "}
-              {props.health?.uptimeSeconds ?? 0} сек
-            </p>
-          </article>
-          <article className="panel">
-            <div className="panel-header">
-              <h2>Операционные метрики</h2>
-              <span>Расчёт из health</span>
-            </div>
-            <div className="metrics-grid">
-              <div>
-                <span>RPS</span>
-                <strong>{props.dashboardMetrics.rps}</strong>
-              </div>
-              <div>
-                <span>Ошибки</span>
-                <strong>{props.dashboardMetrics.errorRate}</strong>
-              </div>
-              <div>
-                <span>Латентность p95</span>
-                <strong>{props.dashboardMetrics.latency}</strong>
-              </div>
-              <div>
-                <span>Доступность</span>
-                <strong>{props.dashboardMetrics.availability}</strong>
-              </div>
-            </div>
-          </article>
-        </section>
-      </Section>
-
-      <Section visible={activeSection === "integrations"}>
-        <section className="integration-grid">
-          {integrations.map((item) => (
-            <article className="integration-card" key={item.name}>
-              <strong>{item.name}</strong>
-              <p>{item.status}</p>
-              {item.name === "Prometheus" ? (
-                <a href="http://localhost:9090" target="_blank" rel="noreferrer">
-                  Открыть Prometheus
-                </a>
-              ) : null}
-              {item.name === "Grafana" ? (
-                <a href="http://localhost:3000" target="_blank" rel="noreferrer">
-                  Открыть Grafana
-                </a>
-              ) : null}
-              {item.name === "Go API" ? (
-                <a href={`${props.apiBaseUrl}/api/v1/health`} target="_blank" rel="noreferrer">
-                  Health endpoint
-                </a>
-              ) : null}
+              </form>
             </article>
-          ))}
-        </section>
-      </Section>
 
-      <Section visible={activeSection === "settings"}>
-        <section className="content-grid two-columns">
-          <article className="panel">
+            <article className="panel">
+              <div className="panel-header">
+                <h2>Библиотека шаблонов</h2>
+                <span>{props.templates.length} доступно</span>
+              </div>
+              <div className="list">
+                {props.templates.map((template) => (
+                  <div className="list-item" key={template.id}>
+                    <div>
+                      <strong>{props.translateTemplateName(template.name)}</strong>
+                      <p>{props.translateTemplateDescription(template.description)}</p>
+                      <p className="subtle">
+                        {template.fileName} · {props.formatBytes(template.sizeBytes)} KB
+                      </p>
+                    </div>
+                    <div className="meta">
+                      <span>{props.translateFromMap(template.category, props.labels.category)}</span>
+                      <span>{template.version}</span>
+                      <a
+                        href={`${props.apiBaseUrl}/api/v1/document-templates/${template.id}/download`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Скачать
+                      </a>
+                    </div>
+                  </div>
+                ))}
+                {!loading && props.templates.length === 0 ? (
+                  <p className="empty">Загрузите первый шаблон.</p>
+                ) : null}
+              </div>
+            </article>
+          </section>
+        ) : null}
+
+        {jobsTab === "files" ? (
+          <section className="content-grid two-columns">
+            <article className="panel">
+              <div className="panel-header">
+                <h2>Исходные файлы</h2>
+                <span>{props.sourceDocuments.length}</span>
+              </div>
+              <div className="list">
+                {props.sourceDocuments.map((document) => (
+                  <div className="list-item" key={document.id}>
+                    <div>
+                      <strong>{document.fileName}</strong>
+                      <p>{props.translateFromMap(document.origin, props.labels.origin)}</p>
+                      <p className="subtle">
+                        {props.translateFromMap(document.kind, props.labels.sourceDocumentKind)} · заявка{" "}
+                        {document.jobId ?? "—"}
+                      </p>
+                    </div>
+                    <div className="meta">
+                      <span>{props.formatDate(document.createdAt)}</span>
+                      <a
+                        href={`${props.apiBaseUrl}/api/v1/source-documents/${document.id}/download`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Скачать
+                      </a>
+                    </div>
+                  </div>
+                ))}
+                {!loading && props.sourceDocuments.length === 0 ? (
+                  <p className="empty">Загрузки из мобильного приложения появятся здесь.</p>
+                ) : null}
+              </div>
+            </article>
+
+            <article className="panel">
+              <div className="panel-header">
+                <h2>Сгенерированные документы</h2>
+                <span>{props.documents.length}</span>
+              </div>
+              <div className="list">
+                {props.documents.map((document) => (
+                  <div className="list-item" key={document.id}>
+                    <div>
+                      <strong>{document.fileName}</strong>
+                      <p>{props.translateTemplateName(document.templateName)}</p>
+                      <p className="subtle">Заявка {document.jobId}</p>
+                    </div>
+                    <div className="meta">
+                      <span>{props.formatDate(document.createdAt)}</span>
+                      <a
+                        href={`${props.apiBaseUrl}/api/v1/generated-documents/${document.id}/download`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Скачать
+                      </a>
+                    </div>
+                  </div>
+                ))}
+                {!loading && props.documents.length === 0 ? (
+                  <p className="empty">После обработки заявок файлы появятся здесь.</p>
+                ) : null}
+              </div>
+            </article>
+          </section>
+        ) : null}
+
+        {jobsTab === "create" ? (
+          <article className="panel panel-narrow">
             <div className="panel-header">
-              <h2>Создание заявки</h2>
-              <span>Постановка заявки на генерацию в очередь</span>
+              <h2>Новая заявка</h2>
+              <span>Постановка в очередь на генерацию</span>
             </div>
             <form className="form-grid" onSubmit={(event) => void props.onJobSubmit(event)}>
               <label className="full-width">
@@ -670,10 +629,7 @@ export function DashboardPageView(props: DashboardPageViewProps) {
                 <select
                   value={props.jobForm.templateId}
                   onChange={(event) =>
-                    props.setJobForm((current) => ({
-                      ...current,
-                      templateId: event.target.value
-                    }))
+                    props.setJobForm((current) => ({ ...current, templateId: event.target.value }))
                   }
                 >
                   <option value="">Выберите шаблон</option>
@@ -698,10 +654,7 @@ export function DashboardPageView(props: DashboardPageViewProps) {
                 <input
                   value={props.jobForm.requestedBy}
                   onChange={(event) =>
-                    props.setJobForm((current) => ({
-                      ...current,
-                      requestedBy: event.target.value
-                    }))
+                    props.setJobForm((current) => ({ ...current, requestedBy: event.target.value }))
                   }
                 />
               </label>
@@ -734,7 +687,7 @@ export function DashboardPageView(props: DashboardPageViewProps) {
                 />
               </label>
               <label className="full-width">
-                Параметры / комментарий к заявке
+                Параметры / комментарий
                 <textarea
                   value={props.jobForm.payload}
                   onChange={(event) =>
@@ -748,155 +701,220 @@ export function DashboardPageView(props: DashboardPageViewProps) {
                   type="submit"
                   disabled={!props.readyToSubmitJob || props.creatingJob}
                 >
-                  {props.creatingJob ? "Создаём..." : "Создать заявку"}
+                  {props.creatingJob ? "Создаём…" : "Создать заявку"}
                 </button>
               </div>
             </form>
           </article>
+        ) : null}
+      </Section>
 
-          <details className="panel voice-pipeline-collapsible">
-            <summary>Тест: голос → Whisper → Bitrix (для разработки)</summary>
-            <div className="voice-pipeline-body">
-              <p className="muted">
-                Служебный контур для проверки транскрипции и команд Bitrix. Загрузите аудио —
-                backend вызовет <code>/transcribe</code> и попытается выполнить действие в Bitrix24
-                при заданном <code>BITRIX_WEBHOOK_URL</code>.
-              </p>
-              {props.voiceError ? <p className="banner error">{props.voiceError}</p> : null}
-              <form
-                className="stacked-form"
-                onSubmit={(event) => void props.onVoicePipelineSubmit(event)}
-              >
-                <label>
-                  Шаблон (необязательно)
-                  <select
-                    value={props.voiceForm.templateId}
-                    onChange={(event) =>
-                      props.setVoiceForm((current) => ({
-                        ...current,
-                        templateId: event.target.value
-                      }))
-                    }
-                  >
-                    <option value="">По умолчанию (первый шаблон)</option>
-                    {props.templateOptions.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {props.translateTemplateName(template.name)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Название источника (необязательно)
-                  <input
-                    value={props.voiceForm.sourceName}
-                    onChange={(event) =>
-                      props.setVoiceForm((current) => ({
-                        ...current,
-                        sourceName: event.target.value
-                      }))
-                    }
-                    placeholder="Тест голоса из админки"
-                  />
-                </label>
-                <label>
-                  Сделка (номер или название, необязательно)
-                  <input
-                    value={props.voiceForm.dealHint}
-                    onChange={(event) =>
-                      props.setVoiceForm((current) => ({ ...current, dealHint: event.target.value }))
-                    }
-                    placeholder="123 или ООО Ромашка"
-                  />
-                </label>
-                <label>
-                  Целевая стадия (необязательно)
-                  <input
-                    value={props.voiceForm.stageHint}
-                    onChange={(event) =>
-                      props.setVoiceForm((current) => ({
-                        ...current,
-                        stageHint: event.target.value
-                      }))
-                    }
-                    placeholder="Квалификация"
-                  />
-                </label>
-                <label>
-                  ID сделки Bitrix (необязательно)
-                  <input
-                    value={props.voiceForm.dealId}
-                    onChange={(event) =>
-                      props.setVoiceForm((current) => ({ ...current, dealId: event.target.value }))
-                    }
-                    placeholder="123"
-                    inputMode="numeric"
-                  />
-                </label>
-                <label>
-                  Название сделки (необязательно)
-                  <input
-                    value={props.voiceForm.dealTitle}
-                    onChange={(event) =>
-                      props.setVoiceForm((current) => ({
-                        ...current,
-                        dealTitle: event.target.value
-                      }))
-                    }
-                    placeholder="ТЕСТОВЫЙ ПРОЕКТ 2024"
-                  />
-                </label>
-                <label>
-                  Аудиофайл
-                  <input
-                    type="file"
-                    accept="audio/*,.m4a,.ogg,.oga,.wav,.mp3,.aac,.flac"
-                    onChange={(event) => props.setVoiceFile(event.target.files?.[0] ?? null)}
-                    required
-                  />
-                </label>
-                <button type="submit" disabled={props.voiceBusy}>
-                  {props.voiceBusy ? "Обработка…" : "Запустить цепочку"}
-                </button>
-              </form>
-              {props.voiceResult ? (
-                <div className="voice-result">
-                  <h3>Результат</h3>
-                  <p>
-                    <strong>Транскрипт:</strong> {props.voiceResult.transcript}
-                  </p>
-                  <p>
-                    <strong>Распознанное действие:</strong>{" "}
-                    {props.translateFromMap(
-                      props.voiceResult.parsedAction,
-                      props.labels.voiceAction
-                    )}
-                  </p>
-                  <p>
-                    <strong>ID сделки:</strong>{" "}
-                    {props.voiceResult.parsedDealId > 0 ? props.voiceResult.parsedDealId : "—"}
-                  </p>
-                  <p>
-                    <strong>Название сделки:</strong>{" "}
-                    {props.voiceResult.parsedDealTitle ? props.voiceResult.parsedDealTitle : "—"}
-                  </p>
-                  <p>
-                    <strong>Bitrix:</strong>{" "}
-                    {props.voiceResult.bitrixConfigured ? "вебхук задан" : "вебхук не задан"}
-                  </p>
-                  <ul>
-                    {props.voiceResult.bitrixSteps.map((step) => (
-                      <li key={step}>{step}</li>
-                    ))}
-                  </ul>
-                  <p className="muted">
-                    Заявка <code>{props.voiceResult.job.id}</code>, файл{" "}
-                    <code>{props.voiceResult.sourceDocument.id}</code>
-                  </p>
+      <Section visible={activeSection === "events"}>
+        <SectionTabs
+          active={eventsTab}
+          onChange={setEventsTab}
+          items={[
+            { id: "events", label: "События", count: props.events.length },
+            { id: "commands", label: "Команды API", count: props.taskCommands.length }
+          ]}
+        />
+
+        {eventsTab === "events" ? (
+          <article className="panel">
+            <div className="panel-header">
+              <h2>Журнал событий</h2>
+              <span>
+                {props.events.length} всего · стр. {props.safeEventsPage + 1}/{props.eventsPageCount}
+              </span>
+            </div>
+            <div className="list">
+              {props.visibleEvents.map((event) => (
+                <div className="list-item stacked" key={event.id}>
+                  <div className="list-topline">
+                    <div>
+                      <strong>{props.translateMessage(event.message)}</strong>
+                      <p>{props.translateFromMap(event.eventType, props.labels.eventType)}</p>
+                    </div>
+                    <div className="meta">
+                      <span className={props.statusClass(event.level)}>
+                        {props.translateFromMap(event.level, props.labels.eventLevel)}
+                      </span>
+                      <span>{props.formatDate(event.createdAt)}</span>
+                    </div>
+                  </div>
+                  <p className="subtle">{props.formatEventDetails(event.details || "")}</p>
                 </div>
+              ))}
+              {!loading && props.events.length === 0 ? (
+                <p className="empty">Системные события появятся после работы платформы.</p>
               ) : null}
             </div>
-          </details>
+            {props.events.length > props.eventsPageSize ? (
+              <div className="list-pagination">
+                <button
+                  type="button"
+                  disabled={props.safeEventsPage <= 0}
+                  onClick={() => props.setEventsPage((page) => Math.max(0, page - 1))}
+                >
+                  Назад
+                </button>
+                <span className="subtle">
+                  {props.safeEventsPage * props.eventsPageSize + 1}–
+                  {Math.min((props.safeEventsPage + 1) * props.eventsPageSize, props.events.length)} из{" "}
+                  {props.events.length}
+                </span>
+                <button
+                  type="button"
+                  disabled={props.safeEventsPage >= props.eventsPageCount - 1}
+                  onClick={() =>
+                    props.setEventsPage((page) => Math.min(props.eventsPageCount - 1, page + 1))
+                  }
+                >
+                  Вперёд
+                </button>
+              </div>
+            ) : null}
+          </article>
+        ) : null}
+
+        {eventsTab === "commands" ? (
+          <article className="panel">
+            <div className="panel-header">
+              <h2>Команды backend</h2>
+              <span>{props.taskCommands.length} зарегистрировано</span>
+            </div>
+            <p className="subtle panel-intro">
+              Действия API: отправка в Bitrix, email-согласование и другие интеграционные команды.
+            </p>
+            <div className="list">
+              {props.taskCommands.map((command) => (
+                <div className="list-item stacked" key={command.id}>
+                  <div className="list-topline">
+                    <div>
+                      <strong>
+                        {props.translateFromMap(command.targetSystem, props.labels.taskTarget)}
+                      </strong>
+                      <p>{props.translateCommandText(command.commandText)}</p>
+                    </div>
+                    <div className="meta">
+                      <span className={props.statusClass(command.status)}>
+                        {props.translateFromMap(command.status, props.labels.taskCommandStatus)}
+                      </span>
+                      <span>{props.formatDate(command.createdAt)}</span>
+                    </div>
+                  </div>
+                  <p className="subtle">
+                    {props.translateFromMap(command.integrationMode, props.labels.integrationMode)} ·{" "}
+                    {props.translateResultMessage(command.resultMessage)}
+                  </p>
+                </div>
+              ))}
+              {!loading && props.taskCommands.length === 0 ? (
+                <p className="empty">Команды появятся при работе интеграций.</p>
+              ) : null}
+            </div>
+          </article>
+        ) : null}
+      </Section>
+
+      <Section visible={activeSection === "health"}>
+        <section className="content-grid two-columns">
+          <article className="panel">
+            <div className="panel-header">
+              <h2>Backend API</h2>
+              <span>{props.health?.service ?? "—"}</span>
+            </div>
+            <p className="metric">
+              {props.translateFromMap(props.health?.status ?? "loading", props.labels.healthStatus)}
+            </p>
+            <dl className="health-dl">
+              <div>
+                <dt>Среда</dt>
+                <dd>{props.health?.environment ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>База данных</dt>
+                <dd>{props.health?.database ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Uptime</dt>
+                <dd>{props.uptimeLabel}</dd>
+              </div>
+              <div>
+                <dt>API-запросов</dt>
+                <dd>{props.health?.productRequestsTotal ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Ошибок</dt>
+                <dd>{props.health?.errorsTotal ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Заявок создано</dt>
+                <dd>{props.health?.jobsCreatedTotal ?? 0}</dd>
+              </div>
+            </dl>
+            <a href={`${props.apiBaseUrl}/api/v1/health`} target="_blank" rel="noreferrer">
+              Открыть health endpoint →
+            </a>
+          </article>
+
+          <article className="panel">
+            <div className="panel-header">
+              <h2>Метрики</h2>
+              <span>{props.metricsSource}</span>
+            </div>
+            <div className="metrics-grid">
+              <div>
+                <span>RPS</span>
+                <strong>{props.dashboardMetrics.rps}</strong>
+              </div>
+              <div>
+                <span>Ошибки</span>
+                <strong>{props.dashboardMetrics.errorRate}</strong>
+              </div>
+              <div>
+                <span>Латентность p95</span>
+                <strong>{props.dashboardMetrics.latency}</strong>
+              </div>
+              <div>
+                <span>Доступность</span>
+                <strong>{props.dashboardMetrics.availability}</strong>
+              </div>
+            </div>
+            {props.systemLoad ? (
+              <div className="health-load-bars">
+                <MetricBar label="CPU" value={props.systemLoad.cpu} />
+                <MetricBar
+                  label="Память"
+                  value={props.systemLoad.memory}
+                  detail={
+                    props.systemLoad.memoryLabel !== "—"
+                      ? `${props.systemLoad.memoryLabel} GB`
+                      : undefined
+                  }
+                />
+              </div>
+            ) : null}
+          </article>
+        </section>
+
+        <section className="integration-grid">
+          {integrations.map((item) => (
+            <article className={`integration-card tone-${item.tone}`} key={item.name}>
+              <strong>{item.name}</strong>
+              <p>{item.status}</p>
+              {item.name === "Prometheus" && props.prometheusUrl ? (
+                <a href={props.prometheusUrl} target="_blank" rel="noreferrer">
+                  Открыть Prometheus
+                </a>
+              ) : null}
+              {item.name === "Grafana" && props.grafanaUrl ? (
+                <a href={props.grafanaUrl} target="_blank" rel="noreferrer">
+                  Открыть Grafana
+                </a>
+              ) : null}
+            </article>
+          ))}
         </section>
       </Section>
     </AdminShell>

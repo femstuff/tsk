@@ -45,19 +45,72 @@ export function bitrixTaskStatusActions(currentStatus: string): BitrixStatusActi
   return actions;
 }
 
+function parseBitrixDateMs(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const iso = Date.parse(trimmed);
+  if (Number.isFinite(iso)) {
+    return iso;
+  }
+  const match = trimmed.match(
+    /^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/
+  );
+  if (!match) {
+    return null;
+  }
+  const [, dd, mm, yyyy, hh = "0", min = "0", sec = "0"] = match;
+  const ms = new Date(
+    Number(yyyy),
+    Number(mm) - 1,
+    Number(dd),
+    Number(hh),
+    Number(min),
+    Number(sec)
+  ).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
 export function formatBitrixDate(value: string | undefined) {
   const raw = String(value ?? "").trim();
   if (!raw) {
     return "—";
   }
-  const date = new Date(raw);
-  if (Number.isNaN(date.getTime())) {
+  const ms = parseBitrixDateMs(raw);
+  if (ms == null) {
     return raw;
   }
   return new Intl.DateTimeFormat("ru-RU", {
     dateStyle: "medium",
     timeStyle: "short"
-  }).format(date);
+  }).format(new Date(ms));
+}
+
+/** Сумма сделки: два знака после запятой, ru-RU. */
+export function formatBitrixMoney(value: string | undefined, currency?: string) {
+  const raw = String(value ?? "")
+    .trim()
+    .replace(/\s/g, "")
+    .replace(",", ".");
+  if (!raw) {
+    return "";
+  }
+  const num = Number(raw);
+  if (!Number.isFinite(num)) {
+    return String(value ?? "").trim();
+  }
+  const formatted = num.toLocaleString("ru-RU", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+  const cur = currency?.trim();
+  return cur ? `${formatted} ${cur}` : formatted;
+}
+
+export function isBitrixMoneyFieldKey(key: string) {
+  const upper = key.toUpperCase();
+  return upper === "OPPORTUNITY" || upper === "OPPORTUNITY_ACCOUNT" || upper === "TAX_VALUE";
 }
 
 export function formatBitrixDuration(secondsRaw: string | undefined) {
@@ -278,11 +331,12 @@ export function formatBitrixAvailableActions(actions?: Record<string, boolean>) 
   return labels.length > 0 ? labels.join(", ") : "—";
 }
 
-export function resolveBitrixFileUrl(url: string | undefined, portalDomain?: string) {
+export function resolveBitrixFileUrl(
+  url: string | undefined,
+  portalDomain?: string,
+  fileId?: string
+) {
   const raw = String(url ?? "").trim();
-  if (!raw) {
-    return "";
-  }
   if (raw.startsWith("http://") || raw.startsWith("https://")) {
     return raw;
   }
@@ -292,6 +346,12 @@ export function resolveBitrixFileUrl(url: string | undefined, portalDomain?: str
     .replace(/\/+$/, "");
   if (raw.startsWith("/") && host) {
     return `https://${host}${raw}`;
+  }
+  const id = String(fileId ?? "")
+    .trim()
+    .replace(/^n/i, "");
+  if (host && id) {
+    return `https://${host}/bitrix/tools/disk/uf.php?attachedId=${encodeURIComponent(id)}`;
   }
   return raw;
 }

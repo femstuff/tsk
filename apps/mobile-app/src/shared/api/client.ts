@@ -71,6 +71,35 @@ function logApiOutcome(
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const VOICE_REQUEST_TIMEOUT_MS = 180_000;
 
+export class BitrixIntentError extends Error {
+  code?: string;
+  item?: MobileBitrixIntentResult;
+
+  constructor(message: string, code?: string, item?: MobileBitrixIntentResult) {
+    super(message);
+    this.name = "BitrixIntentError";
+    this.code = code;
+    this.item = item;
+  }
+}
+
+function throwRequestError(status: number, text: string): never {
+  let parsed: { error?: string; code?: string; item?: MobileBitrixIntentResult } | null = null;
+  try {
+    parsed = JSON.parse(text) as { error?: string; code?: string; item?: MobileBitrixIntentResult };
+  } catch {
+    throw new Error(text || `Request failed: ${status}`);
+  }
+  if (parsed?.code === "deal_not_found" && parsed.item) {
+    throw new BitrixIntentError(
+      parsed.error ?? "Сделка не найдена",
+      parsed.code,
+      parsed.item
+    );
+  }
+  throw new Error(parsed?.error ?? `Request failed: ${status}`);
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
@@ -115,16 +144,14 @@ async function request<T>(
 
   if (!response.ok) {
     const text = await response.text();
-    let thrown: Error;
     try {
-      const parsed = JSON.parse(text) as { error?: string };
-      thrown = new Error(parsed.error ?? `Request failed: ${response.status}`);
-    } catch {
-      thrown = new Error(text || `Request failed: ${response.status}`);
+      throwRequestError(response.status, text);
+    } catch (err) {
+      const thrown = err instanceof Error ? err : new Error(String(err));
+      logApiOutcome(method, path, false, durationMs, `status=${response.status} ${thrown.message}`);
+      void appendRequestLogFailure(path, method, durationMs, thrown.message);
+      throw thrown;
     }
-    logApiOutcome(method, path, false, durationMs, `status=${response.status} ${thrown.message}`);
-    void appendRequestLogFailure(path, method, durationMs, thrown.message);
-    throw thrown;
   }
 
   if (response.status === 204 || response.headers.get("content-length") === "0") {
@@ -226,6 +253,18 @@ export async function updateBitrixTaskStatus(taskId: string, status: number) {
   return response.item;
 }
 
+export async function addBitrixTaskComment(taskId: string, message: string) {
+  const response = await request<{ item: BitrixTaskDetail }>(
+    `/api/v1/mobile/bitrix-tasks/${encodeURIComponent(taskId)}/comments`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: message.trim() })
+    }
+  );
+  return response.item;
+}
+
 export async function listBitrixDeals(limit = 50, search = "", refresh = false) {
   let qs = `limit=${encodeURIComponent(String(limit))}`;
   if (search.trim()) {
@@ -292,6 +331,17 @@ export async function listBitrixNotifications(limit = 100) {
     throw new Error("Неверный ответ сервера при загрузке уведомлений Bitrix24");
   }
   return bundle;
+}
+
+export async function markBitrixNotificationRead(notificationId: string) {
+  await request<void>(
+    `/api/v1/mobile/bitrix-notifications/${encodeURIComponent(notificationId)}/read`,
+    { method: "POST" }
+  );
+}
+
+export async function markAllBitrixNotificationsRead() {
+  await request<void>("/api/v1/mobile/bitrix-notifications/read-all", { method: "POST" });
 }
 
 export async function startBitrixOAuth() {

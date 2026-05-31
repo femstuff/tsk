@@ -1,16 +1,7 @@
 import type { AdminBitrixTaskItem } from "../entities/admin/types";
 import type { DocumentJob, ProcessingEvent } from "../entities/document-job/types";
 
-export type NavSection =
-  | "dashboard"
-  | "documents"
-  | "tasks"
-  | "users"
-  | "templates"
-  | "activity"
-  | "metrics"
-  | "integrations"
-  | "settings";
+export type NavSection = "overview" | "bitrix" | "jobs" | "events" | "health";
 
 export type DayCount = {
   label: string;

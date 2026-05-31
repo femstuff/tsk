@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Linking,
   Modal,
   Pressable,
@@ -11,15 +12,15 @@ import {
   View
 } from "react-native";
 
-import type { BitrixTaskDetail } from "../../entities/document-template/types";
+import type { BitrixTaskDetail, BitrixTaskFile } from "../../entities/document-template/types";
 import { getBitrixTask, updateBitrixTaskStatus } from "../../shared/api/client";
+import { BitrixTaskChatPanel } from "./BitrixTaskChatModal";
 import { useBitrixAuth } from "./useBitrixAuth";
 import {
   bitrixMarkRu,
   bitrixPriorityRu,
   bitrixTaskStatusActions,
   bitrixTaskStatusRu,
-  formatBitrixAuthor,
   formatBitrixDate,
   formatBitrixDuration,
   formatBitrixDurationType,
@@ -62,12 +63,41 @@ function InfoRow({
   );
 }
 
+function TaskFileRow({
+  file,
+  portalDomain,
+  onOpen
+}: {
+  file: BitrixTaskFile;
+  portalDomain?: string;
+  onOpen: (file: BitrixTaskFile) => void;
+}) {
+  const openUrl = resolveBitrixFileUrl(file.downloadUrl || file.viewUrl, portalDomain, file.id);
+  const sizeLabel = formatBitrixFileSize(file.size);
+  return (
+    <Pressable
+      style={styles.fileRow}
+      onPress={() => onOpen({ ...file, downloadUrl: openUrl, viewUrl: openUrl })}
+      disabled={!openUrl}
+    >
+      <Ionicons name="document-attach-outline" size={20} color={HEADER_BLUE} />
+      <View style={styles.fileMeta}>
+        <Text style={styles.fileName}>{file.name || file.id || "Файл"}</Text>
+        {sizeLabel ? <Text style={styles.fileSize}>{sizeLabel}</Text> : null}
+        {!openUrl ? <Text style={styles.fileSize}>Ссылка недоступна</Text> : null}
+      </View>
+      {openUrl ? <Ionicons name="open-outline" size={18} color="#64748b" /> : null}
+    </Pressable>
+  );
+}
+
 export function BitrixTaskDetailModal({ taskId, visible, onClose, onUpdated }: Props) {
   const bitrixAuth = useBitrixAuth();
   const portalDomain = bitrixAuth.session?.portalDomain;
   const [detail, setDetail] = useState<BitrixTaskDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [chatVisible, setChatVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -94,6 +124,7 @@ export function BitrixTaskDetailModal({ taskId, visible, onClose, onUpdated }: P
     if (!visible) {
       setDetail(null);
       setError(null);
+      setChatVisible(false);
     }
   }, [visible, taskId, load]);
 
@@ -114,204 +145,185 @@ export function BitrixTaskDetailModal({ taskId, visible, onClose, onUpdated }: P
     }
   };
 
-  const openFile = async (url?: string) => {
-    const resolved = resolveBitrixFileUrl(url, portalDomain);
+  const openFile = async (file: BitrixTaskFile) => {
+    const resolved = resolveBitrixFileUrl(file.downloadUrl || file.viewUrl, portalDomain, file.id);
     if (!resolved) {
+      Alert.alert("Файл", "Не удалось получить ссылку на файл.");
       return;
     }
     try {
+      const canOpen = await Linking.canOpenURL(resolved);
+      if (!canOpen) {
+        Alert.alert("Файл", "Не удалось открыть ссылку на этом устройстве.");
+        return;
+      }
       await Linking.openURL(resolved);
     } catch {
-      setError("Не удалось открыть файл");
+      Alert.alert("Файл", "Не удалось открыть файл. Возможно, нужен вход в Bitrix24 в браузере.");
     }
   };
 
   const actions = detail ? bitrixTaskStatusActions(detail.status) : [];
   const description = detail?.description ? stripBitrixDescription(detail.description) : "";
+  const commentCount = detail?.comments?.length ?? 0;
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={styles.root}>
-        <View style={styles.header}>
-          <Pressable onPress={onClose} hitSlop={12} style={styles.closeBtn}>
-            <Ionicons name="close" size={26} color="#0f172a" />
-          </Pressable>
-          <Text style={styles.headerTitle}>Задача Bitrix24</Text>
-          <Pressable onPress={() => void load()} hitSlop={12} style={styles.closeBtn}>
-            <Ionicons name="refresh" size={22} color={HEADER_BLUE} />
-          </Pressable>
-        </View>
+      {chatVisible && taskId ? (
+        <BitrixTaskChatPanel
+          taskId={taskId}
+          taskTitle={detail?.title}
+          portalDomain={portalDomain}
+          onBack={() => setChatVisible(false)}
+          onUpdated={() => {
+            void load();
+            onUpdated();
+          }}
+        />
+      ) : (
+        <View style={styles.root}>
+          <View style={styles.header}>
+            <Pressable onPress={onClose} hitSlop={12} style={styles.closeBtn}>
+              <Ionicons name="close" size={26} color="#0f172a" />
+            </Pressable>
+            <Text style={styles.headerTitle}>Задача Bitrix24</Text>
+            <Pressable onPress={() => void load()} hitSlop={12} style={styles.closeBtn}>
+              <Ionicons name="refresh" size={22} color={HEADER_BLUE} />
+            </Pressable>
+          </View>
 
-        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-          {loading ? <ActivityIndicator color={HEADER_BLUE} style={styles.loader} /> : null}
+          <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+            {loading ? <ActivityIndicator color={HEADER_BLUE} style={styles.loader} /> : null}
 
-          {!loading && detail ? (
-            <>
-              <Text style={styles.title}>{detail.title || "Без названия"}</Text>
-              <View style={styles.metaRow}>
-                <Text style={styles.badge}>{bitrixTaskStatusRu(detail.status)}</Text>
-                <Text style={styles.taskIdMeta}>#{detail.id}</Text>
-              </View>
-
-              <View style={styles.infoCard}>
-                <Text style={styles.sectionTitle}>Участники</Text>
-                <InfoRow label="Постановщик" value={formatBitrixPerson(detail.creator)} alwaysShow />
-                <InfoRow label="Исполнитель" value={formatBitrixPerson(detail.responsible)} alwaysShow />
-                <InfoRow label="Соисполнители" value={formatBitrixPeople(detail.accomplices)} />
-                <InfoRow label="Наблюдатели" value={formatBitrixPeople(detail.auditors)} />
-              </View>
-
-              <View style={styles.infoCard}>
-                <Text style={styles.sectionTitle}>Сроки</Text>
-                <InfoRow label="Поставлена" value={formatBitrixDate(detail.createdDate)} alwaysShow />
-                <InfoRow label="Изменена" value={formatBitrixDate(detail.changedDate)} />
-                <InfoRow label="Крайний срок" value={formatBitrixDate(detail.deadline)} alwaysShow />
-                <InfoRow label="Начало" value={formatBitrixDate(detail.dateStart)} />
-                <InfoRow label="План начала" value={formatBitrixDate(detail.startDatePlan)} />
-                <InfoRow label="План окончания" value={formatBitrixDate(detail.endDatePlan)} />
-                <InfoRow label="Закрыта" value={formatBitrixDate(detail.closedDate)} />
-              </View>
-
-              <View style={styles.infoCard}>
-                <Text style={styles.sectionTitle}>Связи и контекст</Text>
-                <InfoRow
-                  label="Родительская задача"
-                  value={formatBitrixReference(detail.parentTitle, detail.parentId)}
-                />
-                <InfoRow
-                  label="Группа / проект"
-                  value={formatBitrixReference(detail.groupTitle, detail.groupId)}
-                />
-                <InfoRow
-                  label="Стадия"
-                  value={formatBitrixReference(detail.stageLabel, detail.stageId)}
-                />
-                <InfoRow label="CRM" value={formatBitrixList(detail.crmLinks)} />
-                <InfoRow label="Теги" value={formatBitrixList(detail.tags)} />
-              </View>
-
-              <View style={styles.infoCard}>
-                <Text style={styles.sectionTitle}>Дополнительно</Text>
-                <InfoRow label="Приоритет" value={bitrixPriorityRu(detail.priority)} />
-                <InfoRow label="Оценка" value={bitrixMarkRu(detail.mark)} />
-                <InfoRow label="Плановое время" value={formatBitrixDuration(detail.timeEstimate)} />
-                <InfoRow label="План длительности" value={formatBitrixDuration(detail.durationPlan)} />
-                <InfoRow label="Тип длительности" value={formatBitrixDurationType(detail.durationType)} />
-                <InfoRow label="Затрачено" value={formatBitrixDuration(detail.durationFact)} />
-              </View>
-
-              {(detail.checklist?.length ?? 0) > 0 ? (
-                <View style={styles.infoCard}>
-                  <Text style={styles.sectionTitle}>Чек-лист</Text>
-                  {detail.checklist?.map((item, index) => (
-                    <View key={item.id ?? `${item.title}-${index}`} style={styles.checklistRow}>
-                      <Ionicons
-                        name={item.isComplete ? "checkbox" : "square-outline"}
-                        size={18}
-                        color={item.isComplete ? "#16a34a" : "#64748b"}
-                      />
-                      <Text style={[styles.checklistText, item.isComplete && styles.checklistDone]}>
-                        {item.title}
-                      </Text>
-                    </View>
-                  ))}
+            {!loading && detail ? (
+              <>
+                <Text style={styles.title}>{detail.title || "Без названия"}</Text>
+                <View style={styles.metaRow}>
+                  <Text style={styles.badge}>{bitrixTaskStatusRu(detail.status)}</Text>
+                  <Text style={styles.taskIdMeta}>#{detail.id}</Text>
                 </View>
-              ) : null}
 
-              {(detail.files?.length ?? 0) > 0 ? (
+                <Pressable style={styles.chatButton} onPress={() => setChatVisible(true)}>
+                  <Ionicons name="chatbubbles-outline" size={22} color={HEADER_BLUE} />
+                  <View style={styles.chatButtonText}>
+                    <Text style={styles.chatButtonTitle}>Чат задачи</Text>
+                    <Text style={styles.chatButtonSubtitle}>
+                      {commentCount > 0 ? `${commentCount} сообщений` : "Написать сообщение"}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
+                </Pressable>
+
                 <View style={styles.infoCard}>
-                  <Text style={styles.sectionTitle}>Файлы</Text>
-                  {detail.files?.map((file, index) => {
-                    const sizeLabel = formatBitrixFileSize(file.size);
-                    const openUrl = file.downloadUrl || file.viewUrl;
-                    return (
-                      <Pressable
-                        key={file.id ?? `${file.name}-${index}`}
-                        style={styles.fileRow}
-                        onPress={() => void openFile(openUrl)}
-                        disabled={!openUrl}
-                      >
-                        <Ionicons name="document-attach-outline" size={20} color={HEADER_BLUE} />
-                        <View style={styles.fileMeta}>
-                          <Text style={styles.fileName}>{file.name || file.id || "Файл"}</Text>
-                          {sizeLabel ? <Text style={styles.fileSize}>{sizeLabel}</Text> : null}
-                        </View>
-                        {openUrl ? <Ionicons name="open-outline" size={18} color="#64748b" /> : null}
-                      </Pressable>
-                    );
-                  })}
+                  <Text style={styles.sectionTitle}>Участники</Text>
+                  <InfoRow label="Постановщик" value={formatBitrixPerson(detail.creator)} alwaysShow />
+                  <InfoRow label="Исполнитель" value={formatBitrixPerson(detail.responsible)} alwaysShow />
+                  <InfoRow label="Соисполнители" value={formatBitrixPeople(detail.accomplices)} />
+                  <InfoRow label="Наблюдатели" value={formatBitrixPeople(detail.auditors)} />
                 </View>
-              ) : null}
 
-              <Text style={styles.sectionTitle}>Описание</Text>
-              <Text style={styles.description}>{description || "Описание не указано."}</Text>
+                <View style={styles.infoCard}>
+                  <Text style={styles.sectionTitle}>Сроки</Text>
+                  <InfoRow label="Поставлена" value={formatBitrixDate(detail.createdDate)} alwaysShow />
+                  <InfoRow label="Изменена" value={formatBitrixDate(detail.changedDate)} />
+                  <InfoRow label="Крайний срок" value={formatBitrixDate(detail.deadline)} alwaysShow />
+                  <InfoRow label="Начало" value={formatBitrixDate(detail.dateStart)} />
+                  <InfoRow label="План начала" value={formatBitrixDate(detail.startDatePlan)} />
+                  <InfoRow label="План окончания" value={formatBitrixDate(detail.endDatePlan)} />
+                  <InfoRow label="Закрыта" value={formatBitrixDate(detail.closedDate)} />
+                </View>
 
-              <View style={styles.infoCard}>
-                <Text style={styles.sectionTitle}>Чат задачи</Text>
-                {(detail.comments?.length ?? 0) === 0 ? (
-                  <Text style={styles.meta}>Комментариев пока нет.</Text>
-                ) : (
-                  detail.comments?.map((comment) => (
-                    <View key={comment.id} style={styles.commentBubble}>
-                      <View style={styles.commentHeader}>
-                        <Text style={styles.commentAuthor}>
-                          {formatBitrixAuthor(comment.authorName, comment.authorId)}
+                <View style={styles.infoCard}>
+                  <Text style={styles.sectionTitle}>Связи и контекст</Text>
+                  <InfoRow
+                    label="Родительская задача"
+                    value={formatBitrixReference(detail.parentTitle, detail.parentId)}
+                  />
+                  <InfoRow
+                    label="Группа / проект"
+                    value={formatBitrixReference(detail.groupTitle, detail.groupId)}
+                  />
+                  <InfoRow
+                    label="Стадия"
+                    value={formatBitrixReference(detail.stageLabel, detail.stageId)}
+                  />
+                  <InfoRow label="CRM" value={formatBitrixList(detail.crmLinks)} />
+                  <InfoRow label="Теги" value={formatBitrixList(detail.tags)} />
+                </View>
+
+                <View style={styles.infoCard}>
+                  <Text style={styles.sectionTitle}>Дополнительно</Text>
+                  <InfoRow label="Приоритет" value={bitrixPriorityRu(detail.priority)} />
+                  <InfoRow label="Оценка" value={bitrixMarkRu(detail.mark)} />
+                  <InfoRow label="Плановое время" value={formatBitrixDuration(detail.timeEstimate)} />
+                  <InfoRow label="План длительности" value={formatBitrixDuration(detail.durationPlan)} />
+                  <InfoRow label="Тип длительности" value={formatBitrixDurationType(detail.durationType)} />
+                  <InfoRow label="Затрачено" value={formatBitrixDuration(detail.durationFact)} />
+                </View>
+
+                {(detail.checklist?.length ?? 0) > 0 ? (
+                  <View style={styles.infoCard}>
+                    <Text style={styles.sectionTitle}>Чек-лист</Text>
+                    {detail.checklist?.map((item, index) => (
+                      <View key={item.id ?? `${item.title}-${index}`} style={styles.checklistRow}>
+                        <Ionicons
+                          name={item.isComplete ? "checkbox" : "square-outline"}
+                          size={18}
+                          color={item.isComplete ? "#16a34a" : "#64748b"}
+                        />
+                        <Text style={[styles.checklistText, item.isComplete && styles.checklistDone]}>
+                          {item.title}
                         </Text>
-                        <Text style={styles.commentDate}>{formatBitrixDate(comment.postDate)}</Text>
                       </View>
-                      <Text style={styles.commentMessage}>
-                        {stripBitrixDescription(comment.message) || "—"}
-                      </Text>
-                      {(comment.files?.length ?? 0) > 0 ? (
-                        <View style={styles.commentFiles}>
-                          {comment.files?.map((file, index) => {
-                            const openUrl = file.downloadUrl || file.viewUrl;
-                            return (
-                              <Pressable
-                                key={file.id ?? `${file.name}-${index}`}
-                                style={styles.commentFileChip}
-                                onPress={() => void openFile(openUrl)}
-                                disabled={!openUrl}
-                              >
-                                <Ionicons name="attach" size={14} color={HEADER_BLUE} />
-                                <Text style={styles.commentFileText}>{file.name || "Файл"}</Text>
-                              </Pressable>
-                            );
-                          })}
-                        </View>
-                      ) : null}
-                    </View>
-                  ))
-                )}
-              </View>
-
-              {actions.length > 0 ? (
-                <>
-                  <Text style={styles.sectionTitle}>Действия</Text>
-                  <View style={styles.actionsRow}>
-                    {actions.map((action) => (
-                      <Pressable
-                        key={action.status}
-                        disabled={updating}
-                        onPress={() => void handleStatusChange(action.status)}
-                        style={[styles.actionBtn, updating && styles.actionBtnDisabled]}
-                      >
-                        <Text style={styles.actionBtnText}>{action.label}</Text>
-                      </Pressable>
                     ))}
                   </View>
-                </>
-              ) : (
-                <Text style={styles.meta}>Для этого статуса нет доступных действий.</Text>
-              )}
-            </>
-          ) : null}
+                ) : null}
 
-          {!loading && !detail && error ? <Text style={styles.error}>{error}</Text> : null}
-          {error && detail ? <Text style={styles.error}>{error}</Text> : null}
-          {updating ? <ActivityIndicator color={HEADER_BLUE} style={styles.loader} /> : null}
-        </ScrollView>
-      </View>
+                {(detail.files?.length ?? 0) > 0 ? (
+                  <View style={styles.infoCard}>
+                    <Text style={styles.sectionTitle}>Файлы задачи</Text>
+                    {detail.files?.map((file, index) => (
+                      <TaskFileRow
+                        key={file.id ?? `${file.name}-${index}`}
+                        file={file}
+                        portalDomain={portalDomain}
+                        onOpen={(next) => void openFile(next)}
+                      />
+                    ))}
+                  </View>
+                ) : null}
+
+                <Text style={styles.sectionTitle}>Описание</Text>
+                <Text style={styles.description}>{description || "Описание не указано."}</Text>
+
+                {actions.length > 0 ? (
+                  <>
+                    <Text style={styles.sectionTitle}>Действия</Text>
+                    <View style={styles.actionsRow}>
+                      {actions.map((action) => (
+                        <Pressable
+                          key={action.status}
+                          disabled={updating}
+                          onPress={() => void handleStatusChange(action.status)}
+                          style={[styles.actionBtn, updating && styles.actionBtnDisabled]}
+                        >
+                          <Text style={styles.actionBtnText}>{action.label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                ) : (
+                  <Text style={styles.meta}>Для этого статуса нет доступных действий.</Text>
+                )}
+              </>
+            ) : null}
+
+            {!loading && !detail && error ? <Text style={styles.error}>{error}</Text> : null}
+            {error && detail ? <Text style={styles.error}>{error}</Text> : null}
+            {updating ? <ActivityIndicator color={HEADER_BLUE} style={styles.loader} /> : null}
+          </ScrollView>
+        </View>
+      )}
     </Modal>
   );
 }
@@ -339,10 +351,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     width: 36
   },
+  scroll: {
+    flex: 1
+  },
   content: {
     gap: 12,
     padding: 16,
-    paddingBottom: 40
+    paddingBottom: 32
   },
   loader: {
     marginVertical: 24
@@ -369,6 +384,30 @@ const styles = StyleSheet.create({
     paddingVertical: 4
   },
   taskIdMeta: {
+    color: "#64748b",
+    fontSize: 13
+  },
+  chatButton: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#dbeafe",
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  chatButtonText: {
+    flex: 1,
+    gap: 2
+  },
+  chatButtonTitle: {
+    color: "#0f172a",
+    fontSize: 16,
+    fontWeight: "700"
+  },
+  chatButtonSubtitle: {
     color: "#64748b",
     fontSize: 13
   },
@@ -449,53 +488,6 @@ const styles = StyleSheet.create({
   fileSize: {
     color: "#64748b",
     fontSize: 12
-  },
-  commentBubble: {
-    backgroundColor: "#f8fafc",
-    borderColor: "#e2e8f0",
-    borderRadius: 12,
-    borderWidth: 1,
-    gap: 6,
-    padding: 12
-  },
-  commentHeader: {
-    alignItems: "center",
-    flexDirection: "row",
-    justifyContent: "space-between"
-  },
-  commentAuthor: {
-    color: "#0f172a",
-    flex: 1,
-    fontSize: 14,
-    fontWeight: "700"
-  },
-  commentDate: {
-    color: "#64748b",
-    fontSize: 12
-  },
-  commentMessage: {
-    color: "#334155",
-    fontSize: 14,
-    lineHeight: 20
-  },
-  commentFiles: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 6
-  },
-  commentFileChip: {
-    alignItems: "center",
-    backgroundColor: "#eff6ff",
-    borderRadius: 999,
-    flexDirection: "row",
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6
-  },
-  commentFileText: {
-    color: HEADER_BLUE,
-    fontSize: 12,
-    fontWeight: "600"
   },
   actionsRow: {
     flexDirection: "row",

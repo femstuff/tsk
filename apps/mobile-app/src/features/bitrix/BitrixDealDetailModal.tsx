@@ -13,7 +13,7 @@ import {
 
 import type { BitrixDealField, BitrixDealDetail } from "../../entities/document-template/types";
 import { getBitrixDeal, updateBitrixDealFields, updateBitrixDealStage } from "../../shared/api/client";
-import { formatBitrixDate, formatBitrixPerson } from "./bitrixTaskUi";
+import { formatBitrixDate, formatBitrixMoney, formatBitrixPerson, isBitrixMoneyFieldKey } from "./bitrixTaskUi";
 
 const HEADER_BLUE = "#2563eb";
 const VISIBLE_FIELDS_COLLAPSED = 5;
@@ -53,8 +53,11 @@ type Props = {
   onUpdated: () => void;
 };
 
-function formatDealFieldValue(key: string, value: string) {
+function formatDealFieldValue(key: string, value: string, currencyId?: string) {
   const upper = key.toUpperCase();
+  if (isBitrixMoneyFieldKey(key)) {
+    return formatBitrixMoney(value, currencyId) || "—";
+  }
   if (
     upper.includes("DATE") ||
     upper.endsWith("_TIME") ||
@@ -67,8 +70,21 @@ function formatDealFieldValue(key: string, value: string) {
   return value;
 }
 
-function formatDealFieldDisplay(field: BitrixDealField) {
-  const display = formatDealFieldValue(field.key, field.value);
+function isDealDateFieldKey(key: string) {
+  const upper = key.toUpperCase();
+  return (
+    upper.includes("DATE") ||
+    upper.endsWith("_TIME") ||
+    upper === "BEGINDATE" ||
+    upper === "CLOSEDATE"
+  );
+}
+
+function formatDealFieldDisplay(field: BitrixDealField, currencyId?: string) {
+  const display = formatDealFieldValue(field.key, field.value, currencyId);
+  if (isDealDateFieldKey(field.key) || isBitrixMoneyFieldKey(field.key)) {
+    return display;
+  }
   const raw = field.rawValue?.trim() ?? "";
   if (!display || display === "—") {
     return display;
@@ -87,7 +103,8 @@ function DealFieldRow({
   onStartEdit,
   onDraftChange,
   onSave,
-  onCancel
+  onCancel,
+  currencyId
 }: {
   field: BitrixDealField;
   editing: boolean;
@@ -97,8 +114,9 @@ function DealFieldRow({
   onDraftChange: (value: string) => void;
   onSave: () => void;
   onCancel: () => void;
+  currencyId?: string;
 }) {
-  const displayValue = formatDealFieldDisplay(field);
+  const displayValue = formatDealFieldDisplay(field, currencyId);
   const hasOptions = (field.options?.length ?? 0) > 0;
 
   return (
@@ -341,6 +359,7 @@ export function BitrixDealDetailModal({ dealId, visible, onClose, onUpdated }: P
                       <DealFieldRow
                         key={field.key}
                         field={field}
+                        currencyId={detail.currencyId}
                         editing={editingKey === field.key}
                         draftValue={draftValue}
                         saving={savingField}
@@ -380,7 +399,7 @@ export function BitrixDealDetailModal({ dealId, visible, onClose, onUpdated }: P
                       <Text style={styles.infoLabel}>Сумма</Text>
                       <Text style={styles.infoValue}>
                         {detail.opportunity
-                          ? `${detail.opportunity} ${detail.currencyId ?? ""}`.trim()
+                          ? formatBitrixMoney(detail.opportunity, detail.currencyId)
                           : "—"}
                       </Text>
                     </View>

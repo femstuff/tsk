@@ -1,245 +1,125 @@
 ﻿# TSK MVP Monorepo
 
-Этот репозиторий теперь содержит минимально рабочий сквозной MVP для:
+Минимально рабочий сквозной MVP:
 
-- `apps/backend-api` - Go backend API
-- `apps/admin-web` - React + TypeScript admin panel
-- `apps/mobile-app` - Expo / React Native mobile client
-- `infra` - Prometheus + Grafana
+- `apps/backend-api` — Go backend API (PostgreSQL, файловое хранилище, Redis-кэш)
+- `apps/admin-web` — React + TypeScript админ-панель
+- `apps/mobile-app` — Expo / React Native мобильное приложение
+- `infra` — Prometheus + Grafana
 
-Legacy-сервисы `bot-service` и `transc-python-service` сохранены и не встроены
-в новый MVP автоматически.
+Legacy-сервисы `bot-service` и `transc-python-service` сохранены отдельно и не входят в основной Docker-стек автоматически.
 
-## Что уже работает
+## Что работает
 
 ### Backend API
 
-Новый backend хранит данные не в памяти, а в `PostgreSQL`, и использует файловое
-storage под volume для шаблонов, входящих voice/source документов и сгенерированных
-документов.
+Данные хранятся в **PostgreSQL**, файлы — во volume `backend-storage`. **Redis** (если задан `REDIS_URL`) кэширует списки шаблонов и Bitrix-задач/сделок на 30–60 секунд; сессии OAuth хранятся в PostgreSQL.
 
-Поддерживаются:
-
-- шаблоны документов
-- jobs / requests
-- generated documents
-- source documents (например, voice recordings из mobile)
-- processing events / operational log feed
-- task commands / dispatch intents для Bitrix24 и email approval flow
+Основные сущности: шаблоны документов, заявки (jobs), сгенерированные и исходные файлы, события обработки, команды интеграций, OAuth-сессии Bitrix24.
 
 Ключевые endpoints:
 
-- `GET /api/v1/health`
-- `GET, POST /api/v1/document-templates`
-- `GET /api/v1/document-templates/{id}/download`
-- `GET, POST /api/v1/document-jobs`
-- `PATCH /api/v1/document-jobs/{id}/status`
-- `POST /api/v1/mobile/voice-requests`
-- `GET /api/v1/source-documents`
-- `GET /api/v1/source-documents/{id}/download`
-- `GET /api/v1/generated-documents`
-- `GET /api/v1/generated-documents/{id}/download`
-- `GET, POST /api/v1/task-commands`
-- `GET /api/v1/processing-events`
-- `GET /metrics`
+| Группа | Маршруты |
+|--------|----------|
+| Health / metrics | `GET /api/v1/health`, `GET /metrics` |
+| Документы | `GET, POST /api/v1/document-templates`, jobs, source/generated documents |
+| Mobile | `POST /api/v1/mobile/voice-requests`, Bitrix intent, tasks, deals, notifications |
+| Bitrix OAuth | `GET /api/v1/mobile/bitrix/oauth/start`, callback, session |
+| Admin | dashboard, processing-events, task-commands |
 
-### Admin Web
+### Admin Web (`http://localhost:5173`)
 
-Админка показывает:
+Пять разделов:
 
-- статус backend
-- шаблоны документов
-- jobs / requests
-- source documents
-- generated documents
-- task commands / dispatch intents
-- operational log feed
+1. **Обзор** — KPI, график заявок/API, последние авторизации Bitrix, последние события
+2. **Bitrix24** — задачи (диаграмма + фильтр), OAuth-пользователи
+3. **Документы** — вкладки: заявки, шаблоны, файлы, новая заявка
+4. **Журнал** — события и команды backend
+5. **Сервер** — health, метрики Prometheus, ссылки на Grafana
 
-Также из админки можно:
-
-- загрузить новый template
-- создать job вручную
-- менять status job
-- скачать template / source document / generated document
+Прокси same-origin: `/api`, `/health`, `/metrics` → backend (nginx в Docker, Vite proxy локально).
 
 ### Mobile App
 
-Mobile app теперь закрывает минимальный пользовательский сценарий:
+Главный экран (вкладки **Главная** / **Сделки** / **Документы** / **Ещё**):
 
-- загрузка шаблонов с backend
-- запись voice note с микрофона
-- создание document request с audio upload
-- добавление manual notes / transcript text
-- создание минимальной task command для `bitrix24` или `email_approval`
-- просмотр собственных mobile requests, uploaded source docs и статусов task commands
+- **Bitrix24 OAuth** — вход через иконку профиля; задачи, сделки, уведомления
+- **Задачи** — список, карточка, смена статуса, **отдельный экран чата** с отправкой сообщений
+- **Сделки** — список, смена стадии, редактирование полей; суммы с двумя знаками после запятой
+- **Голос / текст Bitrix** — intent с подтверждением сделки при неоднозначности
+- **Оценка (estimate)** — загрузка шаблона и генерация документа
+- **Уведомления** — отдельный экран по колокольчику, «прочитать все»
+- **Ещё** — статус сервера, журнал запросов
 
-## Что где хранится
+## Bitrix24
 
-### PostgreSQL
+### Webhook (сервер)
 
-В БД сохраняются:
+`BITRIX_WEBHOOK_URL` в `.env` корня репозитория:
 
-- `document_templates`
-- `document_jobs`
-- `generated_documents`
-- `source_documents`
-- `processing_events`
-- `task_commands`
+```
+BITRIX_WEBHOOK_URL=https://<портал>.bitrix24.ru/rest/<user>/<token>/
+```
 
-### File storage
+Без URL webhook-вызовы не выполняются; команды сохраняются как recorded/pending.
 
-Во volume backend storage сохраняются:
+### OAuth (мобильное приложение)
 
-- файлы шаблонов
-- voice recordings / source uploads из mobile
-- generated document files
+Пользователь авторизуется в приложении. Backend хранит access/refresh token и вызывает Bitrix от его имени.
 
-В Docker stack storage лежит в volume `backend-storage`.
+Для **чата задач** и **уведомлений** нужны scopes `task`, `im` (и CRM для сделок).
 
-## Интеграции
+Отправка сообщений в задачу (backend пробует по порядку):
 
-### Bitrix24
+1. `tasks.task.chat.message.send` — новая карточка задачи (REST v3, `/rest/api/...`)
+2. `im.message.add` — чат задачи по `CHAT` из `tasks.task.get`
+3. `task.commentitem.add` — legacy-комментарии (с `AUTHOR_ID` OAuth-пользователя)
 
-- URL входящего вебхука REST задаётся переменной **`BITRIX_WEBHOOK_URL`** (формат `https://<портал>.bitrix24.ru/rest/<user>/<token>/`).
-- Для **Docker Compose** значение подставляется из файла **`.env` в корне репозитория** (файл в `.gitignore`). Пример строки: `BITRIX_WEBHOOK_URL=https://....bitrix24.ru/rest/1/xxxx/`
-- В `docker-compose.yml` больше не зашит пустой вебхук: используется `BITRIX_WEBHOOK_URL: ${BITRIX_WEBHOOK_URL:-}` — без `.env` переменная пустая и запросы в Bitrix не уходят (это ожидаемо).
-- если задан `BITRIX_WEBHOOK_URL`, backend вызывает REST-методы (`crm.deal.*`, `tasks.task.add` и т.д.)
-- если webhook не задан, команда и intent сохраняются честно как recorded/pending flow
+### Голос → Whisper
 
-### Голос → Whisper → Bitrix (тест из админки)
+В Docker поднимается `whisper-api` (`WHISPER_BASE_URL=http://whisper-api:8000`). Мобильное приложение отправляет аудио на backend; транскрипция и Bitrix-intent обрабатываются на сервере.
 
-В `docker-compose` поднимается сервис `whisper-api` (Python + Whisper). Backend получает `WHISPER_BASE_URL=http://whisper-api:8000`.
+## Где что хранится
 
-В админке (`http://localhost:5173`) есть блок **«Голос → Whisper → Bitrix»**:
+| Хранилище | Содержимое |
+|-----------|------------|
+| PostgreSQL | templates, jobs, documents, events, task_commands, bitrix_oauth_sessions |
+| Volume `backend-storage` | файлы шаблонов, voice/uploads, generated docs |
+| Redis (опционально) | кэш списков Bitrix и шаблонов |
 
-1. Выберите шаблон, укажите название источника, при необходимости введите **ID сделки** Bitrix.
-2. Загрузите аудиофайл и нажмите **«Запустить цепочку»**.
-
-Backend вызывает `POST /transcribe`, сохраняет транскрипт в заявке и пытается выполнить действие в Bitrix по простым правилам текста:
-
-- **следующий этап / дальше** — `crm.deal.update` на следующую стадию воронки;
-- **назад / предыдущий** — предыдущая стадия;
-- **на стадию … / executing / в работе** и т.п. — переход на распознанную стадию;
-- **создай задачу: …** — `tasks.task.add`.
-
-Номер сделки можно произнести в аудио или задать полем **ID сделки**. Первый запуск контейнера Whisper может занять несколько минут (загрузка модели).
-
-### Email approval flow
-
-- email approval сейчас моделируется как persist-нутый approval/task flow
-- backend сохраняет status и лог события
-- реальный SMTP-отправитель пока не реализован
-
-## Метрики и Grafana
-
-Backend экспортирует Prometheus-метрики для:
-
-- raw HTTP request count
-- business-facing HTTP request count (без `/metrics`, health checks и admin polling)
-- jobs created total
-- current job count by status
-- processing duration histogram
-- error count
-- backend uptime
-
-Grafana провижинится автоматически и содержит dashboard `TSK Backend Overview` с:
-
-- product API requests total
-- jobs created
-- failed jobs
-- total errors
-- product traffic / background noise / errors rate
-- jobs by status
-- p95 job processing duration
-
-`GET /api/v1/health` также возвращает обе сводки отдельно:
-
-- `productRequestsTotal` - продуктовые API-запросы
-- `httpRequestsTotalRaw` - весь HTTP traffic, включая технический фон
-
-Admin dashboard обновляет данные раз в 15 секунд только пока вкладка видима. Эти
-polling-запросы помечаются служебным заголовком и исключаются из business-метрик,
-но продолжают попадать в raw технические счётчики.
-
-## Локальный запуск backend/admin/infra
+## Локальный запуск
 
 ### Windows PowerShell
-
-Из корня репозитория:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-up.ps1
 ```
 
-После изменений в `apps/backend-api` или `apps/admin-web` не используйте `-SkipBuild`,
-иначе Docker может поднять ранее собранный образ.
+После изменений в `backend-api` или `admin-web` не используйте `-SkipBuild`.
 
-Если образы уже были собраны ранее:
+Логи: `.\scripts\dev-logs.ps1` · Остановка: `.\scripts\dev-down.ps1`
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-up.ps1 -SkipBuild
-```
-
-Логи:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-logs.ps1
-```
-
-Остановка:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-down.ps1
-```
-
-Остановка и удаление контейнеров:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-down.ps1 -RemoveContainers
-```
-
-### macOS / Linux / environments with `make`
+### macOS / Linux
 
 ```bash
-make build
-make up
+make build && make up
+make logs    # логи
+make down    # остановка
 ```
 
-Логи:
+### Сервисы
 
-```bash
-make logs
-```
+| Сервис | URL |
+|--------|-----|
+| PostgreSQL | `postgres://tsk:tsk@localhost:5432/tsk` |
+| Backend API | `http://localhost:8080/` |
+| Health | `http://localhost:8080/api/v1/health` |
+| Admin | `http://localhost:5173` |
+| Whisper | `http://localhost:8000/transcribe` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` (admin / admin) |
 
-Остановка:
-
-```bash
-make down
-```
-
-### Доступные сервисы
-
-- PostgreSQL: `postgres://tsk:tsk@localhost:5432/tsk`
-- Whisper (транскрипция): `http://localhost:8000/` и `POST http://localhost:8000/transcribe`
-- backend API root: `http://localhost:8080/`
-- backend health JSON: `http://localhost:8080/health`
-- backend health JSON (versioned): `http://localhost:8080/api/v1/health`
-- backend metrics: `http://localhost:8080/metrics`
-- admin web: `http://localhost:5173`
-- admin-proxied health JSON: `http://localhost:5173/health`
-- admin-proxied API health JSON: `http://localhost:5173/api/v1/health`
-- admin-proxied metrics: `http://localhost:5173/metrics`
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000` (`admin` / `admin`)
-
-`apps/admin-web` теперь использует same-origin маршруты `/api`, `/health` и `/metrics`.
-В Docker они проксируются через `nginx`, а в локальном `vite dev` - через proxy к
-`http://localhost:8080`. Это убирает build-time зависимость от захардкоженного
-`VITE_API_BASE_URL=http://localhost:8080` для локального сценария.
-
-## Запуск mobile app отдельно
-
-Mobile запускается честно с хоста, а не через Docker-эмуляцию.
+## Mobile app
 
 ```bash
 cd apps/mobile-app
@@ -247,75 +127,52 @@ npm install
 npm run start
 ```
 
-По умолчанию mobile использует:
+По умолчанию API:
 
 - Android emulator: `http://10.0.2.2:8080`
-- прочие среды: `http://localhost:8080`
+- iOS simulator / прочее: `http://localhost:8080`
 
-Если нужен другой backend URL, перед запуском задайте `EXPO_PUBLIC_API_BASE_URL`.
-
-Примеры:
-
-```powershell
-$env:EXPO_PUBLIC_API_BASE_URL="http://10.0.2.2:8080"
-npm run start
-```
+Другой хост:
 
 ```powershell
 $env:EXPO_PUBLIC_API_BASE_URL="http://192.168.1.50:8080"
 npm run start
 ```
 
-Для физического устройства укажите LAN IP хоста.
+После изменений backend пересоберите образ:
 
-## Минимальный локальный сценарий проверки
+```powershell
+docker compose build backend-api
+docker compose up -d backend-api
+```
 
-1. Поднимите backend/admin/infra через `.\scripts\dev-up.ps1` или `make up`.
-2. Убедитесь, что health endpoint отвечает JSON:
-   - `http://localhost:8080/health`
-   - или `http://localhost:5173/api/v1/health`
-3. Откройте `http://localhost:5173` и нажмите `Refresh data`.
-4. В админке должны загрузиться `Backend status`, templates, jobs и operational feed без `404`.
-5. При необходимости загрузите template или используйте seed templates.
-6. Запустите mobile app с хоста (`cd apps/mobile-app && npm install && npm run start`).
-7. В mobile выберите template, запишите voice note, добавьте notes и отправьте request.
-8. Убедитесь, что в админке появились:
-   - новый job
-   - source document с voice file
-   - processing events
-   - после обработки - generated document
-9. Проверьте `task commands` / dispatch intents:
-   - без `BITRIX_WEBHOOK_URL` должен появиться recorded/pending flow
-   - с `BITRIX_WEBHOOK_URL` backend попытается выполнить webhook вызов
-10. Откройте Grafana и проверьте dashboard `TSK Backend Overview`.
+## Метрики
 
-## Как быстро получить видимые метрики
+Backend экспортирует Prometheus-метрики: HTTP traffic, business requests, **заявки на документы** (не задачи Bitrix24), errors, uptime. Grafana dashboard: **TSK Backend Overview**.
 
-Сразу после старта Prometheus уже должен видеть target `backend-api`.
+Счётчики `tsk_document_jobs_by_status` и `tsk_document_jobs_total` синхронизируются с PostgreSQL каждые 30 секунд и при создании/смене статуса заявки. После деплоя перезапустите `backend-api` и обновите dashboard в Grafana (или `docker compose restart grafana`).
 
-1. Откройте `http://localhost:9090/targets` и проверьте, что `backend-api` в состоянии `UP`.
-2. Откройте `http://localhost:8080/health` 2-3 раза или нажмите `Refresh data` в админке.
-3. Создайте хотя бы один job из admin или отправьте voice request из mobile.
-4. Для появления processing-метрик дождитесь, пока job перейдет в `completed` или `failed`.
-5. После этого откройте `http://localhost:3000` и dashboard `TSK Backend Overview`.
+Admin polling помечается служебным заголовком и не попадает в business-метрики.
 
-Полезные Prometheus queries для локальной проверки:
+Полезные запросы:
 
 - `up{job="backend-api"}`
 - `sum(tsk_business_http_requests_total)`
-- `sum(tsk_http_requests_total)`
-- `sum(tsk_http_requests_total) - sum(tsk_business_http_requests_total)`
-- `sum(tsk_document_jobs_created_total)`
 - `sum by (status) (tsk_document_jobs_by_status)`
-- `sum(tsk_errors_total)`
 
-## Legacy сервисы
+## Минимальная проверка
 
-Legacy topology по-прежнему поднимается отдельным profile:
+1. `.\scripts\dev-up.ps1` или `make up`
+2. `http://localhost:5173` — обзор без ошибок
+3. Mobile: OAuth Bitrix → задачи / сделки / чат
+4. Голосовой или текстовый Bitrix-intent
+5. Grafana: dashboard после нескольких API-запросов
+
+## Legacy
 
 ```bash
 make up-legacy
 make logs-legacy
 ```
 
-Это не часть нового MVP flow и не должно мешать backend/admin/mobile стеку.
+Отдельный profile, не мешает основному стеку.

@@ -57,3 +57,20 @@ func RestBaseURL(portalDomain, clientEndpoint string) string {
 	}
 	return "https://" + host + "/rest/"
 }
+
+// RestAPIV3Base вставляет сегмент /api/ в REST URL для методов tasks v3 (например chat.message.send).
+func RestAPIV3Base(restBase string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(restBase), "/")
+	if strings.Contains(trimmed, "/rest/api") {
+		return trimmed
+	}
+	if strings.HasSuffix(trimmed, "/rest") {
+		return trimmed + "/api"
+	}
+	const marker = "/rest/"
+	idx := strings.Index(trimmed, marker)
+	if idx < 0 {
+		return trimmed
+	}
+	return trimmed[:idx+len(marker)] + "api/" + trimmed[idx+len(marker):]
+}

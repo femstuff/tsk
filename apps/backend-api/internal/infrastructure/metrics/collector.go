@@ -23,6 +23,7 @@ type Collector struct {
 	httpRequests         *prometheus.CounterVec
 	businessRequests     *prometheus.CounterVec
 	jobStatusGauge       *prometheus.GaugeVec
+	jobsTotalGauge       prometheus.Gauge
 		jobProcessingLatency *prometheus.HistogramVec
 		httpRequestDuration  *prometheus.HistogramVec
 		jobCreated           prometheus.Counter
@@ -46,6 +47,10 @@ func NewCollector() *Collector {
 			Name: "tsk_document_jobs_by_status",
 			Help: "Current number of document jobs by status.",
 		}, []string{"status"}),
+		jobsTotalGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "tsk_document_jobs_total",
+			Help: "Total number of document jobs in the database.",
+		}),
 		jobProcessingLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "tsk_document_job_processing_duration_seconds",
 			Help:    "Processing duration of document jobs.",
@@ -77,6 +82,7 @@ func NewCollector() *Collector {
 		collector.httpRequests,
 		collector.businessRequests,
 		collector.jobStatusGauge,
+		collector.jobsTotalGauge,
 		collector.jobProcessingLatency,
 		collector.httpRequestDuration,
 		collector.jobCreated,
@@ -126,9 +132,13 @@ func (c *Collector) RecordError(kind string) {
 }
 
 func (c *Collector) SyncJobStatusCounts(counts map[domain.Status]int) {
+	total := 0
 	for _, status := range domain.ValidStatuses() {
-		c.jobStatusGauge.WithLabelValues(string(status)).Set(float64(counts[status]))
+		count := counts[status]
+		c.jobStatusGauge.WithLabelValues(string(status)).Set(float64(count))
+		total += count
 	}
+	c.jobsTotalGauge.Set(float64(total))
 }
 
 func (c *Collector) Uptime() time.Duration {

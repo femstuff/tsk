@@ -415,6 +415,35 @@ func (h *Handler) UpdateMobileBitrixTaskStatus(w http.ResponseWriter, r *http.Re
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": detail})
 }
 
+func (h *Handler) AddMobileBitrixTaskComment(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimSpace(r.PathValue("id"))
+	if taskID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "task id is required")
+		return
+	}
+
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	message := strings.TrimSpace(body.Message)
+	if message == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+
+	detail, err := h.service.AddBitrixTaskCommentForMobile(r.Context(), taskID, message, r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": detail})
+}
+
 func (h *Handler) ListMobileBitrixDeals(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
@@ -454,6 +483,27 @@ func (h *Handler) ListMobileBitrixNotifications(w http.ResponseWriter, r *http.R
 		"items":    bundle.Items,
 		"authMode": bundle.AuthMode,
 	})
+}
+
+func (h *Handler) MarkMobileBitrixNotificationRead(w http.ResponseWriter, r *http.Request) {
+	notificationID := strings.TrimSpace(r.PathValue("id"))
+	if notificationID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "notification id is required")
+		return
+	}
+	if err := h.service.MarkBitrixNotificationReadForMobile(r.Context(), notificationID, r.Header.Get(app.BitrixSessionHeaderName())); err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) MarkAllMobileBitrixNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.MarkAllBitrixNotificationsReadForMobile(r.Context(), r.Header.Get(app.BitrixSessionHeaderName())); err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) GetMobileBitrixDeal(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +668,7 @@ func (h *Handler) CreateMobileBitrixIntent(w http.ResponseWriter, r *http.Reques
 			StageHintText:     strings.TrimSpace(body.StageHint),
 		})
 		if err != nil {
-			h.writeDomainError(w, err)
+			h.writeMobileBitrixIntentError(w, result, err)
 			return
 		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": result})
@@ -666,11 +716,23 @@ func (h *Handler) CreateMobileBitrixIntent(w http.ResponseWriter, r *http.Reques
 		StageHintText:     strings.TrimSpace(r.FormValue("stageHint")),
 	})
 	if err != nil {
-		h.writeDomainError(w, err)
+		h.writeMobileBitrixIntentError(w, result, err)
 		return
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": result})
+}
+
+func (h *Handler) writeMobileBitrixIntentError(w http.ResponseWriter, result app.MobileBitrixIntentResult, err error) {
+	if errors.Is(err, app.ErrBitrixDealNotFound) {
+		httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error": err.Error(),
+			"code":  "deal_not_found",
+			"item":  result,
+		})
+		return
+	}
+	h.writeDomainError(w, err)
 }
 
 func (h *Handler) AdminVoiceBitrixPipeline(w http.ResponseWriter, r *http.Request) {

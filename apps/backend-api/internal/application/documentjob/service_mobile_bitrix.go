@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,9 @@ import (
 	"tsk/backend-api/internal/infrastructure/cache"
 	"tsk/backend-api/internal/integrations/bitrixclient"
 )
+
+// ErrBitrixDealNotFound — сделка не найдена по распознанному тексту или подсказкам.
+var ErrBitrixDealNotFound = errors.New("сделка не найдена по ID или названию")
 
 // MobileBitrixIntentInput — текст и/или голос + подсказки по сделке/стадии (без заявки на документ).
 type MobileBitrixIntentInput struct {
@@ -169,7 +173,7 @@ func (s *Service) RunMobileBitrixIntent(ctx context.Context, in MobileBitrixInte
 		if dealID <= 0 {
 			res.BitrixSteps = append(res.BitrixSteps,
 				"Сделка: не найден ID — укажите dealId, название сделки в форме или в тексте запроса")
-			err = errors.New("сделка не найдена по ID или названию")
+			err = ErrBitrixDealNotFound
 			return res, err
 		}
 		res.ParsedDealID = dealID
@@ -502,6 +506,68 @@ func (s *Service) UpdateBitrixTaskStatusForMobile(ctx context.Context, taskID st
 	s.invalidateBitrixTaskListCache(ctx, rid, 80, "")
 	s.invalidateBitrixTaskListCache(ctx, rid, 60, "")
 	detail, err := s.bitrix.GetTask(ctx, taskID)
+	if err != nil {
+		return bitrixclient.BitrixTaskDetail{}, err
+	}
+	return detail, nil
+}
+
+// AddBitrixTaskCommentForMobile — новое сообщение в чате задачи и возврат обновлённой карточки.
+func (s *Service) AddBitrixTaskCommentForMobile(ctx context.Context, taskID, message, oauthSessionID string) (bitrixclient.BitrixTaskDetail, error) {
+	taskID = strings.TrimSpace(taskID)
+	message = strings.TrimSpace(message)
+	if taskID == "" {
+		return bitrixclient.BitrixTaskDetail{}, errors.New("task id is required")
+	}
+	if message == "" {
+		return bitrixclient.BitrixTaskDetail{}, errors.New("message is required")
+	}
+	oauthSessionID = strings.TrimSpace(oauthSessionID)
+
+	if oauthSessionID != "" && s.BitrixOAuthEnabled() {
+		session, err := s.ensureActiveBitrixSession(ctx, oauthSessionID)
+		if err != nil {
+			return bitrixclient.BitrixTaskDetail{}, err
+		}
+		client := bitrixclient.NewTokenREST(session.PortalDomain, session.RestEndpoint, session.AccessToken, s.httpClient)
+		detail, err := client.GetTask(ctx, taskID)
+		if err != nil {
+			return bitrixclient.BitrixTaskDetail{}, bitrixclient.TasksListUserError(err)
+		}
+		if err := client.AddTaskComment(ctx, taskID, detail.ChatID, message, strconv.Itoa(session.BitrixUserID)); err != nil {
+			return bitrixclient.BitrixTaskDetail{}, bitrixclient.TasksListUserError(err)
+		}
+		s.invalidateBitrixTaskListCache(ctx, session.BitrixUserID, 80, oauthSessionID)
+		s.invalidateBitrixTaskListCache(ctx, session.BitrixUserID, 60, oauthSessionID)
+		detail, err = client.GetTask(ctx, taskID)
+		if err != nil {
+			return bitrixclient.BitrixTaskDetail{}, bitrixclient.TasksListUserError(err)
+		}
+		return detail, nil
+	}
+
+	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		if s.BitrixOAuthEnabled() {
+			return bitrixclient.BitrixTaskDetail{}, fmt.Errorf("войдите в Bitrix24 в приложении или настройте BITRIX_WEBHOOK_URL на сервере")
+		}
+		return bitrixclient.BitrixTaskDetail{}, fmt.Errorf("BITRIX_WEBHOOK_URL не настроен на сервере")
+	}
+
+	detail, err := s.bitrix.GetTask(ctx, taskID)
+	if err != nil {
+		return bitrixclient.BitrixTaskDetail{}, err
+	}
+	authorID := ""
+	if rid, err := s.bitrix.WebhookOwnerUserID(); err == nil && rid > 0 {
+		authorID = strconv.Itoa(rid)
+	}
+	if err := s.bitrix.AddTaskComment(ctx, taskID, detail.ChatID, message, authorID); err != nil {
+		return bitrixclient.BitrixTaskDetail{}, err
+	}
+	rid, _ := s.bitrix.WebhookOwnerUserID()
+	s.invalidateBitrixTaskListCache(ctx, rid, 80, "")
+	s.invalidateBitrixTaskListCache(ctx, rid, 60, "")
+	detail, err = s.bitrix.GetTask(ctx, taskID)
 	if err != nil {
 		return bitrixclient.BitrixTaskDetail{}, err
 	}

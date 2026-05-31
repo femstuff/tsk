@@ -128,11 +128,68 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(tsk_document_jobs_created_total{job=\"backend-api\"})",
+          "expr": "max(tsk_document_jobs_total{job=\"backend-api\"}) or sum(tsk_document_jobs_by_status{job=\"backend-api\"})",
           "refId": "A"
         }
       ],
-      "title": "Jobs Created Total",
+      "title": "Document Jobs Total",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "11.2.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(tsk_document_jobs_by_status{job=\"backend-api\",status=\"completed\"})",
+          "refId": "A"
+        }
+      ],
+      "title": "Completed Jobs",
       "type": "stat"
     },
     {
@@ -164,7 +221,7 @@
       "gridPos": {
         "h": 8,
         "w": 6,
-        "x": 12,
+        "x": 18,
         "y": 0
       },
       "id": 3,
@@ -189,72 +246,11 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(tsk_document_jobs_by_status{job=\"backend-api\",status=\"failed\"})",
+          "expr": "sum(tsk_document_jobs_by_status{job=\"backend-api\",status=\"failed\"})",
           "refId": "A"
         }
       ],
       "title": "Failed Jobs",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 0
-      },
-      "id": 4,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "11.2.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(rate(tsk_errors_total{job=\"backend-api\"}[5m]))",
-          "refId": "A"
-        }
-      ],
-      "title": "Errors / sec",
       "type": "stat"
     },
     {
@@ -402,7 +398,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (status) (tsk_document_jobs_by_status{job=\"backend-api\"})",
+          "expr": "sum by (status) (tsk_document_jobs_by_status{job=\"backend-api\"})",
           "legendFormat": "{{status}}",
           "refId": "A"
         }

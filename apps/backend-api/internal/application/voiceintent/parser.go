@@ -113,9 +113,13 @@ func Parse(text string, dealIDOverride int) Intent {
 }
 
 func finalizeIntent(out Intent) Intent {
+	out.DealTitle = strings.TrimSpace(out.DealTitle)
 	if strings.TrimSpace(out.DealTitle) == "" {
 		out.DealTitle = extractDealTitleFromSpeech(out.RawSummary)
 	}
+	out.DealTitle = strings.TrimSpace(out.DealTitle)
+	out.StageHint = strings.TrimSpace(out.StageHint)
+	out.TaskTitle = strings.TrimSpace(out.TaskTitle)
 	return out
 }
 

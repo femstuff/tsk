@@ -585,47 +585,26 @@ func (c *Client) listStages(ctx context.Context, categoryID int) ([]bitrixStage,
 	return stages, nil
 }
 
-// FindDealIDByTitle ищет сделку по точному названию.
+// FindDealIDByTitle ищет сделку по названию без учёта регистра (точное совпадение).
 func (c *Client) FindDealIDByTitle(ctx context.Context, title string) (int, error) {
-	u := c.webhookURL + "/crm.deal.list.json?filter[TITLE]=" + url.QueryEscape(title) + "&select[]=ID"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, err
-	}
-
-	var parsed bitrixDealListResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return 0, err
-	}
-
-	if len(parsed.Result) == 0 {
-		return 0, fmt.Errorf("deal with title %q not found", title)
-	}
-
-	id, err := strconv.Atoi(parsed.Result[0].ID)
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
+	id, _, err := c.findDealByTitleNormalized(ctx, title, true)
+	return id, err
 }
 
 // FindDealIDByTitleFuzzy ищет сделку, у которой TITLE содержит needle (без учёта регистра), по последним сделкам.
 func (c *Client) FindDealIDByTitleFuzzy(ctx context.Context, needle string) (id int, matchedTitle string, err error) {
+	return c.findDealByTitleNormalized(ctx, needle, false)
+}
+
+func normalizeDealTitle(title string) string {
+	return strings.TrimSpace(strings.ToLower(title))
+}
+
+func (c *Client) findDealByTitleNormalized(ctx context.Context, title string, exact bool) (int, string, error) {
 	if !c.WebhookConfigured() {
 		return 0, "", fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
 	}
-	needle = strings.TrimSpace(strings.ToLower(needle))
+	needle := normalizeDealTitle(title)
 	if needle == "" {
 		return 0, "", fmt.Errorf("empty deal title search string")
 	}
@@ -660,21 +639,29 @@ func (c *Client) FindDealIDByTitleFuzzy(ctx context.Context, needle string) (id 
 			break
 		}
 		for _, row := range parsed.Result {
-			t := strings.TrimSpace(strings.ToLower(row.Title))
+			t := normalizeDealTitle(row.Title)
 			if t == "" {
 				continue
 			}
-			if strings.Contains(t, needle) {
-				id, convErr := strconv.Atoi(row.ID)
-				if convErr != nil {
-					continue
-				}
-				return id, row.Title, nil
+			matched := t == needle
+			if !exact {
+				matched = strings.Contains(t, needle)
 			}
+			if !matched {
+				continue
+			}
+			id, convErr := strconv.Atoi(row.ID)
+			if convErr != nil {
+				continue
+			}
+			return id, row.Title, nil
 		}
 	}
 
-	return 0, "", fmt.Errorf("no deal with title containing %q (searched recent deals)", needle)
+	if exact {
+		return 0, "", fmt.Errorf("deal with title %q not found", strings.TrimSpace(title))
+	}
+	return 0, "", fmt.Errorf("no deal with title containing %q (searched recent deals)", strings.TrimSpace(title))
 }
 
 func (c *Client) findStageIDByName(ctx context.Context, stageName string, categoryID int) (string, error) {

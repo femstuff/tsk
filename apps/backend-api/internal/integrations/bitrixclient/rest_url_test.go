@@ -22,6 +22,22 @@ func TestRestBaseURL(t *testing.T) {
 	}
 }
 
+func TestRestAPIV3Base(t *testing.T) {
+	t.Parallel()
+
+	got := RestAPIV3Base("https://b24-test.bitrix24.ru/rest/1/abc/")
+	want := "https://b24-test.bitrix24.ru/rest/api/1/abc"
+	if got != want {
+		t.Fatalf("RestAPIV3Base(webhook) = %q, want %q", got, want)
+	}
+
+	got = RestAPIV3Base("https://b24-test.bitrix24.ru/rest/")
+	want = "https://b24-test.bitrix24.ru/rest/api"
+	if got != want {
+		t.Fatalf("RestAPIV3Base(oauth base) = %q, want %q", got, want)
+	}
+}
+
 func TestTokenRESTMethodURL(t *testing.T) {
 	t.Parallel()
 

@@ -39,7 +39,10 @@ import {
   listBitrixTasks,
   listJobs,
   listSourceDocuments,
-  listTemplates
+  listTemplates,
+  BitrixIntentError,
+  markAllBitrixNotificationsRead,
+  markBitrixNotificationRead
 } from "../shared/api/client";
 import {
   getRequestLog,
@@ -51,7 +54,7 @@ import {
 import { useBitrixAuth } from "../features/bitrix/useBitrixAuth";
 import { BitrixDealDetailModal } from "../features/bitrix/BitrixDealDetailModal";
 import { BitrixTaskDetailModal } from "../features/bitrix/BitrixTaskDetailModal";
-import { bitrixTaskFilterLabel, bitrixTaskMatchesFilter, bitrixTaskStatusRu, formatBitrixDate, pickLatestAssignedBitrixTask } from "../features/bitrix/bitrixTaskUi";
+import { bitrixTaskFilterLabel, bitrixTaskMatchesFilter, bitrixTaskStatusRu, formatBitrixDate, formatBitrixMoney, pickLatestAssignedBitrixTask } from "../features/bitrix/bitrixTaskUi";
 
 const HEADER_BLUE = "#2563eb";
 const BG = "#e8eef5";
@@ -62,11 +65,16 @@ type LogFilterTab = "all" | RequestLogKind | "errors";
 
 type RecordingPhase = "idle" | "recording" | "stopping" | "ready";
 
+type BitrixDealConfirmState = {
+  parsedTitle: string;
+  transcript: string;
+  source: "text" | "voice";
+  step: "confirm" | "hint";
+};
+
 type SubmitProgressState = {
   title: string;
   message: string;
-  step: number;
-  totalSteps: number;
   elapsedSec: number;
 };
 
@@ -76,16 +84,32 @@ const ESTIMATE_SUBMIT_STEPS = [
   "Разбор полей сметы и сохранение…"
 ];
 
-const BITRIX_VOICE_SUBMIT_STEPS = [
-  "Отправка аудио на сервер…",
-  "Распознавание речи (Whisper) — обычно 30–90 сек…",
-  "Выполнение действия в Bitrix24…"
-];
+function bitrixVoiceProgressMessage(elapsedSec: number) {
+  if (elapsedSec < 3) {
+    return "Отправка аудио на сервер…";
+  }
+  if (elapsedSec < 45) {
+    return "Распознавание речи (Whisper) — обычно 15–60 сек…";
+  }
+  return "Выполнение действия в Bitrix24…";
+}
 
-const BITRIX_TEXT_SUBMIT_STEPS = [
-  "Отправка текста на сервер…",
-  "Выполнение действия в Bitrix24…"
-];
+function bitrixTextProgressMessage(elapsedSec: number) {
+  if (elapsedSec < 2) {
+    return "Отправка текста на сервер…";
+  }
+  return "Выполнение действия в Bitrix24…";
+}
+
+function estimateProgressMessage(elapsedSec: number) {
+  if (elapsedSec < 3) {
+    return ESTIMATE_SUBMIT_STEPS[0];
+  }
+  if (elapsedSec < 45) {
+    return ESTIMATE_SUBMIT_STEPS[1];
+  }
+  return ESTIMATE_SUBMIT_STEPS[2];
+}
 
 function actionLabelRu(code: string | undefined) {
   if (!code) {
@@ -142,7 +166,10 @@ export function HomeScreen() {
   const [bitrixNotifications, setBitrixNotifications] = useState<BitrixNotificationSummary[]>([]);
   const [bitrixNotificationsError, setBitrixNotificationsError] = useState<string | null>(null);
   const [bitrixNotificationsLoading, setBitrixNotificationsLoading] = useState(false);
-  const [bitrixNotificationsAuthMode, setBitrixNotificationsAuthMode] = useState<string | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [expandedNotificationId, setExpandedNotificationId] = useState<string | null>(null);
+  const [bitrixDealConfirm, setBitrixDealConfirm] = useState<BitrixDealConfirmState | null>(null);
+  const [dealConfirmHint, setDealConfirmHint] = useState("");
   const [bitrixDeals, setBitrixDeals] = useState<BitrixDealSummary[]>([]);
   const [bitrixDealsError, setBitrixDealsError] = useState<string | null>(null);
   const [bitrixDealsSearch, setBitrixDealsSearch] = useState("");
@@ -163,7 +190,6 @@ export function HomeScreen() {
   const [bitrixAudioUri, setBitrixAudioUri] = useState<string | null>(null);
   const docRecordingRef = useRef<Audio.Recording | null>(null);
   const bitrixRecordingRef = useRef<Audio.Recording | null>(null);
-  const submitProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const submitElapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [submitProgress, setSubmitProgress] = useState<SubmitProgressState | null>(null);
   const previewSoundRef = useRef<Audio.Sound | null>(null);
@@ -174,6 +200,7 @@ export function HomeScreen() {
   const [activeTab, setActiveTab] = useState<MainTab>("home");
   const [docVoiceOpen, setDocVoiceOpen] = useState(false);
   const [bitrixVoiceOpen, setBitrixVoiceOpen] = useState(false);
+  const [bitrixAuthOpen, setBitrixAuthOpen] = useState(false);
   const [bitrixIntentText, setBitrixIntentText] = useState("");
   const [bitrixHints, setBitrixHints] = useState({
     dealId: "",
@@ -204,10 +231,6 @@ export function HomeScreen() {
   }, []);
 
   const clearSubmitProgressTimers = useCallback(() => {
-    if (submitProgressTimerRef.current) {
-      clearInterval(submitProgressTimerRef.current);
-      submitProgressTimerRef.current = null;
-    }
     if (submitElapsedTimerRef.current) {
       clearInterval(submitElapsedTimerRef.current);
       submitElapsedTimerRef.current = null;
@@ -215,35 +238,27 @@ export function HomeScreen() {
   }, []);
 
   const beginSubmitProgress = useCallback(
-    (title: string, steps: string[]) => {
+    (title: string, messageForElapsed: (elapsedSec: number) => string) => {
       clearSubmitProgressTimers();
       setSubmitProgress({
         title,
-        message: steps[0] ?? "Обработка…",
-        step: 1,
-        totalSteps: steps.length,
+        message: messageForElapsed(0),
         elapsedSec: 0
       });
 
       submitElapsedTimerRef.current = setInterval(() => {
-        setSubmitProgress((current) =>
-          current ? { ...current, elapsedSec: current.elapsedSec + 1 } : current
-        );
-      }, 1000);
-
-      submitProgressTimerRef.current = setInterval(() => {
         setSubmitProgress((current) => {
           if (!current) {
             return current;
           }
-          const nextStep = Math.min(current.step + 1, current.totalSteps);
+          const elapsedSec = current.elapsedSec + 1;
           return {
             ...current,
-            step: nextStep,
-            message: steps[nextStep - 1] ?? current.message
+            elapsedSec,
+            message: messageForElapsed(elapsedSec)
           };
         });
-      }, 12_000);
+      }, 1000);
     },
     [clearSubmitProgressTimers]
   );
@@ -265,10 +280,8 @@ export function HomeScreen() {
     try {
       const bundle = await listBitrixNotifications(100);
       setBitrixNotifications(Array.isArray(bundle.items) ? bundle.items : []);
-      setBitrixNotificationsAuthMode(typeof bundle.authMode === "string" ? bundle.authMode : null);
     } catch (err) {
       setBitrixNotifications([]);
-      setBitrixNotificationsAuthMode(null);
       setBitrixNotificationsError(
         err instanceof Error ? err.message : "Не удалось загрузить уведомления Bitrix24"
       );
@@ -435,16 +448,10 @@ export function HomeScreen() {
     [bitrixTasks, bitrixResponsibleId]
   );
 
-  const notificationPreview = useMemo(() => {
-    const t = latestAssignedBitrixTask;
-    if (t?.title) {
-      return t.title.length > 72 ? `${t.title.slice(0, 72)}…` : t.title;
-    }
-    if (jobs[0]) {
-      return `${jobs[0].templateName}: ${jobs[0].status}`;
-    }
-    return "Нет свежих задач из Bitrix";
-  }, [latestAssignedBitrixTask, jobs]);
+  const unreadNotificationCount = useMemo(
+    () => bitrixNotifications.filter((item) => !item.read).length,
+    [bitrixNotifications]
+  );
 
   const filteredBitrixTasks = useMemo(
     () => bitrixTasks.filter((task) => bitrixTaskMatchesFilter(task, bitrixTaskFilter)),
@@ -668,7 +675,7 @@ export function HomeScreen() {
       return;
     }
     setSubmittingRequest(true);
-    beginSubmitProgress("Формирование сметы", ESTIMATE_SUBMIT_STEPS);
+    beginSubmitProgress("Формирование сметы", estimateProgressMessage);
     try {
       await createMobileVoiceRequest({
         ...requestForm,
@@ -707,50 +714,142 @@ export function HomeScreen() {
     return Number.isFinite(n) && n > 0 ? n : undefined;
   };
 
-  const submitBitrixText = async () => {
+  const resetBitrixFormFields = useCallback(() => {
+    setBitrixIntentText("");
+    setBitrixHints({
+      dealId: "",
+      dealTitle: "",
+      dealHint: "",
+      stageHint: ""
+    });
+    setDealConfirmHint("");
+  }, []);
+
+  const markNotificationReadLocal = useCallback((notificationId: string) => {
+    setBitrixNotifications((items) =>
+      items.map((item) => (item.id === notificationId ? { ...item, read: true } : item))
+    );
+  }, []);
+
+  const handleNotificationPress = useCallback(
+    async (item: BitrixNotificationSummary) => {
+      if (expandedNotificationId === item.id) {
+        setExpandedNotificationId(null);
+        return;
+      }
+      setExpandedNotificationId(item.id);
+      if (!item.read) {
+        markNotificationReadLocal(item.id);
+        try {
+          await markBitrixNotificationRead(item.id);
+        } catch {
+          // локально уже отметили — badge обновится
+        }
+      }
+    },
+    [expandedNotificationId, markNotificationReadLocal]
+  );
+
+  const markAllNotificationsReadHandler = useCallback(async () => {
+    if (unreadNotificationCount === 0) {
+      return;
+    }
+    try {
+      await markAllBitrixNotificationsRead();
+      setBitrixNotifications((items) => items.map((item) => ({ ...item, read: true })));
+    } catch (err) {
+      Alert.alert(
+        "Уведомления",
+        err instanceof Error ? err.message : "Не удалось отметить прочитанными"
+      );
+    }
+  }, [unreadNotificationCount]);
+
+  const beginBitrixDealConfirm = useCallback(
+    (parsedTitle: string, transcript: string, source: "text" | "voice") => {
+      setDealConfirmHint("");
+      setBitrixDealConfirm({
+        parsedTitle: parsedTitle.trim(),
+        transcript: transcript.trim(),
+        source,
+        step: "confirm"
+      });
+    },
+    []
+  );
+
+  const handleBitrixIntentFailure = useCallback(
+    (err: unknown, source: "text" | "voice", skipDealConfirm = false) => {
+      if (
+        !skipDealConfirm &&
+        err instanceof BitrixIntentError &&
+        err.code === "deal_not_found" &&
+        err.item
+      ) {
+        const title =
+          err.item.parsedDealTitle?.trim() ||
+          err.item.transcript?.trim() ||
+          bitrixHints.dealTitle.trim() ||
+          bitrixHints.dealHint.trim();
+        beginBitrixDealConfirm(title, err.item.transcript ?? "", source);
+        return;
+      }
+      const message = err instanceof Error ? err.message : "Ошибка Bitrix";
+      setError(message);
+      Alert.alert("Bitrix24", message);
+    },
+    [beginBitrixDealConfirm, bitrixHints.dealHint, bitrixHints.dealTitle]
+  );
+
+  const submitBitrixText = async (dealHintOverride?: string, skipDealConfirm = false) => {
     if (!bitrixIntentText.trim()) {
       return;
     }
     setSubmittingBitrix(true);
-    beginSubmitProgress("Запрос в Bitrix24", BITRIX_TEXT_SUBMIT_STEPS);
+    beginSubmitProgress("Запрос в Bitrix24", bitrixTextProgressMessage);
+    const hint = (dealHintOverride ?? bitrixHints.dealHint).trim();
     try {
       const item = await createMobileBitrixIntentText({
         text: bitrixIntentText.trim(),
         dealId: parseDealId(),
-        dealTitle: bitrixHints.dealTitle.trim() || undefined,
-        dealHint: bitrixHints.dealHint.trim() || undefined,
+        dealTitle: hint || bitrixHints.dealTitle.trim() || undefined,
+        dealHint: hint || undefined,
         stageHint: bitrixHints.stageHint.trim() || undefined
       });
-      setBitrixIntentText("");
+      resetBitrixFormFields();
+      setBitrixDealConfirm(null);
       void refresh();
       Alert.alert("Bitrix24", (item?.bitrixSteps ?? []).join("\n") || "Запрос выполнен.");
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : "Ошибка Bitrix";
-      setError(message);
-      Alert.alert("Bitrix24", message);
+      handleBitrixIntentFailure(nextError, "text", skipDealConfirm);
     } finally {
       endSubmitProgress();
       setSubmittingBitrix(false);
     }
   };
 
-  const submitBitrixVoice = async () => {
-    if (!bitrixAudioUri) {
-      Alert.alert("Запись", "Сначала запишите голос или введите текст на главной.");
+  const submitBitrixFromTranscript = async (
+    transcript: string,
+    dealTitle: string,
+    skipDealConfirm = false
+  ) => {
+    if (!transcript.trim()) {
+      Alert.alert("Bitrix24", "Нет распознанного текста для повторной отправки.");
       return;
     }
     setSubmittingBitrix(true);
-    beginSubmitProgress("Голос в Bitrix24", BITRIX_VOICE_SUBMIT_STEPS);
+    beginSubmitProgress("Bitrix24", bitrixTextProgressMessage);
+    const hint = dealTitle.trim();
     try {
-      const item = await createMobileBitrixIntentMultipart({
-        audioUri: bitrixAudioUri,
-        audioFileName: `bitrix-intent-${Date.now()}.m4a`,
-        audioMimeType: "audio/mp4",
+      const item = await createMobileBitrixIntentText({
+        text: transcript.trim(),
         dealId: parseDealId(),
-        dealTitle: bitrixHints.dealTitle.trim() || undefined,
-        dealHint: bitrixHints.dealHint.trim() || undefined,
+        dealTitle: hint || undefined,
+        dealHint: hint || undefined,
         stageHint: bitrixHints.stageHint.trim() || undefined
       });
+      setBitrixDealConfirm(null);
+      resetBitrixFormFields();
       await stopPreviewPlayback();
       setBitrixAudioUri(null);
       setBitrixRecordingPhase("idle");
@@ -758,13 +857,61 @@ export function HomeScreen() {
       void refresh();
       Alert.alert("Bitrix24", (item?.bitrixSteps ?? []).join("\n") || "Запрос выполнен.");
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : "Ошибка Bitrix";
-      setError(message);
-      Alert.alert("Bitrix24", message);
+      handleBitrixIntentFailure(nextError, "voice", skipDealConfirm);
     } finally {
       endSubmitProgress();
       setSubmittingBitrix(false);
     }
+  };
+
+  const submitBitrixVoice = async (dealHintOverride?: string, skipDealConfirm = false) => {
+    if (!bitrixAudioUri) {
+      Alert.alert("Запись", "Сначала запишите голос или введите текст на главной.");
+      return;
+    }
+    setSubmittingBitrix(true);
+    beginSubmitProgress("Голос в Bitrix24", bitrixVoiceProgressMessage);
+    const hint = (dealHintOverride ?? bitrixHints.dealHint).trim();
+    try {
+      const item = await createMobileBitrixIntentMultipart({
+        audioUri: bitrixAudioUri,
+        audioFileName: `bitrix-intent-${Date.now()}.m4a`,
+        audioMimeType: "audio/mp4",
+        dealId: parseDealId(),
+        dealTitle: hint || bitrixHints.dealTitle.trim() || undefined,
+        dealHint: hint || undefined,
+        stageHint: bitrixHints.stageHint.trim() || undefined
+      });
+      await stopPreviewPlayback();
+      setBitrixAudioUri(null);
+      setBitrixRecordingPhase("idle");
+      setBitrixDealConfirm(null);
+      resetBitrixFormFields();
+      setBitrixVoiceOpen(false);
+      void refresh();
+      Alert.alert("Bitrix24", (item?.bitrixSteps ?? []).join("\n") || "Запрос выполнен.");
+    } catch (nextError) {
+      handleBitrixIntentFailure(nextError, "voice", skipDealConfirm);
+    } finally {
+      endSubmitProgress();
+      setSubmittingBitrix(false);
+    }
+  };
+
+  const retryBitrixWithDealHint = async () => {
+    const hint = dealConfirmHint.trim();
+    const confirm = bitrixDealConfirm;
+    if (!hint || !confirm) {
+      Alert.alert("Подсказка", "Введите номер или название сделки.");
+      return;
+    }
+    setBitrixHints((current) => ({ ...current, dealHint: hint, dealTitle: hint }));
+    setBitrixDealConfirm(null);
+    if (confirm.source === "voice" && confirm.transcript.trim()) {
+      await submitBitrixFromTranscript(confirm.transcript, hint, true);
+      return;
+    }
+    await submitBitrixText(hint, true);
   };
 
   const openEstimateVoice = () => {
@@ -847,13 +994,10 @@ export function HomeScreen() {
           <View style={styles.progressCard}>
             <ActivityIndicator size="large" color={HEADER_BLUE} />
             <Text style={styles.progressTitle}>{submitProgress.title}</Text>
-            <Text style={styles.progressStep}>
-              Шаг {submitProgress.step} из {submitProgress.totalSteps}
-            </Text>
             <Text style={styles.progressMessage}>{submitProgress.message}</Text>
             <Text style={styles.progressElapsed}>Прошло {submitProgress.elapsedSec} сек</Text>
             <Text style={styles.progressHint}>
-              Не закрывайте приложение. Первый запрос Whisper может занять до 2 минут.
+              Не закрывайте приложение. Распознавание речи может занять до 2 минут.
             </Text>
           </View>
         </View>
@@ -920,53 +1064,216 @@ export function HomeScreen() {
     </>
   );
 
+  const renderBitrixDealConfirmModal = () => {
+    if (!bitrixDealConfirm) {
+      return null;
+    }
+    const titleLabel =
+      bitrixDealConfirm.parsedTitle ||
+      (bitrixDealConfirm.transcript.length > 80
+        ? `${bitrixDealConfirm.transcript.slice(0, 80)}…`
+        : bitrixDealConfirm.transcript) ||
+      "эту сделку";
+
+    return (
+      <Modal
+        visible
+        transparent
+        animationType="fade"
+        onRequestClose={() => setBitrixDealConfirm(null)}
+      >
+        <Pressable style={styles.authOverlay} onPress={() => setBitrixDealConfirm(null)}>
+          <Pressable style={styles.authSheet} onPress={() => undefined}>
+            {bitrixDealConfirm.step === "confirm" ? (
+              <>
+                <Text style={styles.authSheetTitle}>Сделка не найдена</Text>
+                <Text style={styles.muted}>
+                  Вы имели в виду «{titleLabel}»?
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    setBitrixDealConfirm(null);
+                    Alert.alert(
+                      "Сделка не найдена",
+                      `Сделки «${titleLabel}» нет в Bitrix24.`
+                    );
+                  }}
+                  style={[styles.button, styles.primaryButton, styles.submitWide]}
+                >
+                  <Text style={styles.buttonText}>Да, это она</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() =>
+                    setBitrixDealConfirm((current) =>
+                      current ? { ...current, step: "hint" } : current
+                    )
+                  }
+                  style={[styles.button, styles.secondaryButton, styles.submitWide]}
+                >
+                  <Text style={styles.buttonTextDark}>Нет, уточнить</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={styles.authSheetTitle}>Уточните сделку</Text>
+                <Text style={styles.muted}>
+                  Введите номер или название сделки. Повторим запрос с вашей подсказкой — голос
+                  заново не распознаём.
+                </Text>
+                <TextInput
+                  placeholder="Номер или название сделки"
+                  placeholderTextColor="#94a3b8"
+                  style={styles.input}
+                  value={dealConfirmHint}
+                  onChangeText={setDealConfirmHint}
+                  autoFocus
+                />
+                <Pressable
+                  onPress={() => void retryBitrixWithDealHint()}
+                  disabled={submittingBitrix || !dealConfirmHint.trim()}
+                  style={[
+                    styles.button,
+                    styles.primaryButton,
+                    styles.submitWide,
+                    (submittingBitrix || !dealConfirmHint.trim()) && styles.buttonDisabled
+                  ]}
+                >
+                  <Text style={styles.buttonText}>
+                    {submittingBitrix ? "Отправка…" : "Отправить снова"}
+                  </Text>
+                </Pressable>
+              </>
+            )}
+            <Pressable onPress={() => setBitrixDealConfirm(null)} style={styles.authSheetClose}>
+              <Text style={styles.linkInline}>Отмена</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    );
+  };
+
+  const renderBitrixAuthModal = () => (
+    <Modal
+      visible={bitrixAuthOpen}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setBitrixAuthOpen(false)}
+    >
+      <Pressable style={styles.authOverlay} onPress={() => setBitrixAuthOpen(false)}>
+        <Pressable style={styles.authSheet} onPress={() => undefined}>
+          <Text style={styles.authSheetTitle}>Bitrix24</Text>
+          {bitrixAuth.loading ? (
+            <ActivityIndicator color={HEADER_BLUE} />
+          ) : bitrixAuth.connected && bitrixAuth.session ? (
+            <>
+              <Text style={styles.muted}>
+                Вы вошли как {bitrixAuth.session.userName || `id ${bitrixAuth.session.bitrixUserId}`}.
+                Задачи и уведомления загружаются от вашего аккаунта.
+              </Text>
+              {bitrixAuth.session.taskScopeGranted === false ? (
+                <Text style={styles.errorText}>
+                  Нет права «Задачи» у приложения. В Bitrix24 включите scope task в локальном
+                  приложении, затем выйдите и войдите снова.
+                </Text>
+              ) : null}
+              <Pressable
+                onPress={() =>
+                  void bitrixAuth.disconnect().then(() => {
+                    setBitrixAuthOpen(false);
+                    return refresh();
+                  })
+                }
+                style={[styles.button, styles.secondaryButton, styles.submitWide]}
+              >
+                <Text style={styles.buttonTextDark}>Выйти из Bitrix24</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={styles.muted}>
+                Войдите в Bitrix24, чтобы видеть свои задачи и уведомления (не только пользователя
+                вебхука на сервере).
+              </Text>
+              <Pressable
+                onPress={() =>
+                  void bitrixAuth.connect().then(() => {
+                    setBitrixAuthOpen(false);
+                    return refresh();
+                  })
+                }
+                disabled={bitrixAuth.connecting}
+                style={[
+                  styles.button,
+                  styles.primaryButton,
+                  styles.submitWide,
+                  bitrixAuth.connecting && styles.buttonDisabled
+                ]}
+              >
+                <Text style={styles.buttonText}>
+                  {bitrixAuth.connecting ? "Открываем Bitrix…" : "Войти в Bitrix24"}
+                </Text>
+              </Pressable>
+            </>
+          )}
+          <Pressable onPress={() => setBitrixAuthOpen(false)} style={styles.authSheetClose}>
+            <Text style={styles.linkInline}>Закрыть</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+
   const renderHomeDashboard = () => (
     <>
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Bitrix24 — вход</Text>
-        {bitrixAuth.loading ? (
-          <ActivityIndicator color={HEADER_BLUE} />
-        ) : bitrixAuth.connected && bitrixAuth.session ? (
-          <>
-            <Text style={styles.muted}>
-              Вы вошли как {bitrixAuth.session.userName || `id ${bitrixAuth.session.bitrixUserId}`}.
-              Задачи ниже загружаются от вашего аккаунта.
-            </Text>
-            {bitrixAuth.session.taskScopeGranted === false ? (
-              <Text style={styles.errorText}>
-                Нет права «Задачи» у приложения. В Bitrix24 включите scope task в локальном
-                приложении, затем выйдите и войдите снова.
-              </Text>
-            ) : null}
-            <Pressable
-              onPress={() => void bitrixAuth.disconnect().then(() => refresh())}
-              style={[styles.button, styles.secondaryButton, styles.submitWide]}
-            >
-              <Text style={styles.buttonTextDark}>Выйти из Bitrix24</Text>
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardTitle}>Мои задачи Bitrix24</Text>
+          <Pressable onPress={() => setActiveTab("tasks")}>
+            <Text style={styles.linkInline}>Все задачи</Text>
+          </Pressable>
+        </View>
+        {bitrixTaskStats ? (
+          <View style={styles.bitrixStatsRow}>
+            <Pressable style={taskStatBoxStyle("open")} onPress={() => applyTaskFilter("open")}>
+              <Text style={styles.bitrixStatNum}>{bitrixTaskStats.totalOpen}</Text>
+              <Text style={styles.bitrixStatLabel}>Открыто</Text>
             </Pressable>
-          </>
+            <Pressable style={taskStatBoxStyle("in_progress")} onPress={() => applyTaskFilter("in_progress")}>
+              <Text style={[styles.bitrixStatNum, { color: "#0369a1" }]}>
+                {bitrixTaskStats.inProgress}
+              </Text>
+              <Text style={styles.bitrixStatLabel}>В работе</Text>
+            </Pressable>
+            <Pressable style={taskStatBoxStyle("overdue")} onPress={() => applyTaskFilter("overdue")}>
+              <Text style={[styles.bitrixStatNum, { color: "#b91c1c" }]}>
+                {bitrixTaskStats.overdue}
+              </Text>
+              <Text style={styles.bitrixStatLabel}>Просрочено</Text>
+            </Pressable>
+          </View>
+        ) : bitrixTasksError ? (
+          <Text style={styles.muted}>{bitrixTasksError}</Text>
+        ) : bitrixAuth.connected ? (
+          <Text style={styles.muted}>
+            Задачи не найдены для вашего аккаунта Bitrix (ответственный / соисполнитель).
+          </Text>
         ) : (
-          <>
-            <Text style={styles.muted}>
-              Войдите в Bitrix24, чтобы видеть свои задачи (не только пользователя вебхука на
-              сервере).
-            </Text>
-            <Pressable
-              onPress={() => void bitrixAuth.connect().then(() => refresh())}
-              disabled={bitrixAuth.connecting}
-              style={[
-                styles.button,
-                styles.primaryButton,
-                styles.submitWide,
-                bitrixAuth.connecting && styles.buttonDisabled
-              ]}
-            >
-              <Text style={styles.buttonText}>
-                {bitrixAuth.connecting ? "Открываем Bitrix…" : "Войти в Bitrix24"}
-              </Text>
-            </Pressable>
-          </>
+          <Text style={styles.muted}>
+            Нажмите иконку профиля вверху слева, чтобы войти в Bitrix24.
+          </Text>
         )}
+        {latestAssignedBitrixTask ? (
+          <Pressable
+            style={styles.notifRow}
+            onPress={() => openTaskDetail(latestAssignedBitrixTask.id)}
+          >
+            <Text style={styles.notifText} numberOfLines={2}>
+              {latestAssignedBitrixTask.title || "Без названия"}
+            </Text>
+            <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
+          </Pressable>
+        ) : null}
       </View>
 
       <View style={styles.card}>
@@ -1030,55 +1337,6 @@ export function HomeScreen() {
       </View>
 
       <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Text style={styles.cardTitle}>Мои задачи Bitrix24</Text>
-          <Pressable onPress={() => setActiveTab("tasks")}>
-            <Text style={styles.linkInline}>Все задачи</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.muted}>
-          Счётчики по вашим задачам (ответственный = вы после OAuth, иначе пользователь вебхука).
-          До {80} шт. в выборке.
-        </Text>
-        {bitrixTaskStats ? (
-          <View style={styles.bitrixStatsRow}>
-            <Pressable style={taskStatBoxStyle("open")} onPress={() => applyTaskFilter("open")}>
-              <Text style={styles.bitrixStatNum}>{bitrixTaskStats.totalOpen}</Text>
-              <Text style={styles.bitrixStatLabel}>Открыто</Text>
-            </Pressable>
-            <Pressable style={taskStatBoxStyle("in_progress")} onPress={() => applyTaskFilter("in_progress")}>
-              <Text style={[styles.bitrixStatNum, { color: "#0369a1" }]}>
-                {bitrixTaskStats.inProgress}
-              </Text>
-              <Text style={styles.bitrixStatLabel}>В работе</Text>
-            </Pressable>
-            <Pressable style={taskStatBoxStyle("overdue")} onPress={() => applyTaskFilter("overdue")}>
-              <Text style={[styles.bitrixStatNum, { color: "#b91c1c" }]}>
-                {bitrixTaskStats.overdue}
-              </Text>
-              <Text style={styles.bitrixStatLabel}>Просрочено</Text>
-            </Pressable>
-          </View>
-        ) : bitrixTasksError ? (
-          <Text style={styles.muted}>{bitrixTasksError}</Text>
-        ) : bitrixAuth.connected ? (
-          <Text style={styles.muted}>
-            Задачи не найдены для вашего аккаунта Bitrix (ответственный / соисполнитель).
-          </Text>
-        ) : (
-          <Text style={styles.muted}>
-            Войдите в Bitrix24 или настройте BITRIX_WEBHOOK_URL на сервере.
-          </Text>
-        )}
-        {bitrixResponsibleId != null ? (
-          <Text style={styles.muted}>
-            Bitrix user id: {bitrixResponsibleId}
-            {bitrixAuthMode ? ` · ${bitrixAuthMode}` : ""}
-          </Text>
-        ) : null}
-      </View>
-
-      <View style={styles.card}>
         <Text style={styles.cardTitle}>Голос в Bitrix24</Text>
         <Text style={styles.muted}>
           Запишите команду голосом: смена этапа сделки, поиск по названию и другие действия в CRM.
@@ -1105,23 +1363,6 @@ export function HomeScreen() {
         </Pressable>
       </View>
 
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Свежая задача из Bitrix</Text>
-        <Pressable
-          style={styles.notifRow}
-          onPress={() => {
-            if (latestAssignedBitrixTask?.id) {
-              openTaskDetail(latestAssignedBitrixTask.id);
-            } else {
-              setActiveTab("tasks");
-            }
-          }}
-        >
-          <Text style={styles.notifText}>{notificationPreview}</Text>
-          <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
-        </Pressable>
-      </View>
-
       {error ? (
         <View style={styles.errorBanner}>
           <Text style={styles.errorText}>{error}</Text>
@@ -1130,19 +1371,6 @@ export function HomeScreen() {
           </Pressable>
         </View>
       ) : null}
-
-      {renderBitrixNotificationsCard()}
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Сервер</Text>
-        <Text style={styles.muted}>{getMobileApiBaseUrl()}</Text>
-        <Text style={styles.muted}>
-          Статус: {health?.status ?? "…"} · заявок: {health?.jobsCreatedTotal ?? 0}
-        </Text>
-        <Pressable onPress={() => void refresh()} style={styles.linkBtn}>
-          <Text style={styles.linkBtnText}>Обновить</Text>
-        </Pressable>
-      </View>
     </>
   );
 
@@ -1218,33 +1446,77 @@ export function HomeScreen() {
     </>
   );
 
-  const renderBitrixNotificationsCard = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Уведомления Bitrix24</Text>
-      <Text style={styles.muted}>
-        Системные и персональные уведомления из Bitrix24
-        {bitrixNotificationsAuthMode ? ` · ${bitrixNotificationsAuthMode}` : ""}
-        {bitrixNotifications.length > 0 ? ` · ${bitrixNotifications.length} шт.` : ""}
-      </Text>
-      {bitrixNotificationsError ? <Text style={styles.errorText}>{bitrixNotificationsError}</Text> : null}
-      {bitrixNotificationsLoading ? <ActivityIndicator color={HEADER_BLUE} /> : null}
-      {!bitrixNotificationsLoading && !bitrixNotificationsError && bitrixNotifications.length === 0 ? (
-        <Text style={styles.muted}>
-          {bitrixAuth.connected
-            ? "Уведомлений нет или нет прав im/notifications."
-            : "Войдите в Bitrix24, чтобы видеть уведомления."}
-        </Text>
-      ) : null}
-      {bitrixNotifications.slice(0, 20).map((item) => (
-        <View key={item.id} style={styles.listItem}>
-          <View style={styles.listHeader}>
-            <Text style={styles.listTitle}>{item.title || item.module || "Уведомление"}</Text>
-            {!item.read ? <Text style={styles.badge}>новое</Text> : null}
-          </View>
-          <Text style={styles.muted}>{item.text || "—"}</Text>
-          <Text style={styles.muted}>{formatBitrixDate(item.date)}</Text>
-        </View>
-      ))}
+  const renderNotificationsScreen = () => (
+    <View style={styles.voiceRoot}>
+      <View style={[styles.voiceHeader, { paddingTop: topInset + 8 }]}>
+        <Pressable onPress={() => setNotificationsOpen(false)} hitSlop={12}>
+          <Text style={styles.voiceClose}>Закрыть</Text>
+        </Pressable>
+        <Text style={styles.voiceTitle}>Уведомления</Text>
+        <Pressable
+          onPress={() => void markAllNotificationsReadHandler()}
+          hitSlop={12}
+          disabled={unreadNotificationCount === 0}
+        >
+          <Text
+            style={[
+              styles.voiceClose,
+              { textAlign: "right" },
+              unreadNotificationCount === 0 && { opacity: 0.45 }
+            ]}
+          >
+            Прочитать все
+          </Text>
+        </Pressable>
+      </View>
+      <ScrollView
+        style={styles.voiceScroll}
+        contentContainerStyle={styles.voiceScrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={bitrixNotificationsLoading}
+            onRefresh={() => void loadBitrixNotifications()}
+            tintColor={HEADER_BLUE}
+            colors={[HEADER_BLUE]}
+          />
+        }
+      >
+        {bitrixNotificationsError ? <Text style={styles.errorText}>{bitrixNotificationsError}</Text> : null}
+        {bitrixNotificationsLoading && bitrixNotifications.length === 0 ? (
+          <ActivityIndicator color={HEADER_BLUE} />
+        ) : null}
+        {!bitrixNotificationsLoading && !bitrixNotificationsError && bitrixNotifications.length === 0 ? (
+          <Text style={styles.muted}>
+            {bitrixAuth.connected
+              ? "Уведомлений нет или нет прав im/notifications."
+              : "Войдите в Bitrix24 через иконку профиля, чтобы видеть уведомления."}
+          </Text>
+        ) : null}
+        {bitrixNotifications.map((item) => {
+          const expanded = expandedNotificationId === item.id;
+          return (
+            <Pressable
+              key={item.id}
+              onPress={() => void handleNotificationPress(item)}
+              style={[styles.listItem, !item.read && styles.notificationUnread]}
+            >
+              <View style={styles.listHeader}>
+                <Text style={styles.listTitle}>{item.title || item.module || "Уведомление"}</Text>
+                {!item.read ? <Text style={styles.badge}>новое</Text> : null}
+              </View>
+              <Text style={styles.muted} numberOfLines={expanded ? undefined : 2}>
+                {item.text || "—"}
+              </Text>
+              <Text style={styles.muted}>{formatBitrixDate(item.date)}</Text>
+              {expanded ? (
+                <Text style={styles.linkInline}>{item.read ? "Свернуть" : "Прочитано"}</Text>
+              ) : (
+                <Text style={styles.muted}>Нажмите, чтобы раскрыть</Text>
+              )}
+            </Pressable>
+          );
+        })}
+      </ScrollView>
     </View>
   );
 
@@ -1282,11 +1554,14 @@ export function HomeScreen() {
             </View>
             {deal.opportunity ? (
               <Text style={styles.muted}>
-                Сумма: {deal.opportunity} {deal.currencyId ?? ""}
+                Сумма: {formatBitrixMoney(deal.opportunity, deal.currencyId)}
               </Text>
             ) : null}
             <Text style={styles.muted}>
-              id: {deal.id} · {formatDate(deal.dateModify ?? deal.dateCreate ?? null)}
+              id: {deal.id}
+              {deal.dateModify || deal.dateCreate
+                ? ` · ${formatBitrixDate(deal.dateModify ?? deal.dateCreate)}`
+                : ""}
             </Text>
           </Pressable>
         ))}
@@ -1345,9 +1620,18 @@ export function HomeScreen() {
     ];
     return (
       <>
-        {renderBitrixNotificationsCard()}
         <View style={styles.card}>
-        <Text style={styles.cardTitle}>Ещё</Text>
+          <Text style={styles.cardTitle}>Сервер</Text>
+          <Text style={styles.muted}>{getMobileApiBaseUrl()}</Text>
+          <Text style={styles.muted}>
+            Статус: {health?.status ?? "…"} · заявок: {health?.jobsCreatedTotal ?? 0}
+          </Text>
+          <Pressable onPress={() => void refresh()} style={styles.linkBtn}>
+            <Text style={styles.linkBtnText}>Обновить</Text>
+          </Pressable>
+        </View>
+        <View style={styles.card}>
+        <Text style={styles.cardTitle}>Журнал запросов</Text>
         <Text style={styles.muted}>
           Журнал хранится на телефоне (до 80 записей). Те же действия Bitrix дублируются в админке в
           «Журнал событий».
@@ -1456,8 +1740,8 @@ export function HomeScreen() {
         nestedScrollEnabled
       >
         <Text style={styles.muted}>
-          Запишите фразу (например «переведи сделку … на следующий этап»). Нужен WHISPER_BASE_URL на
-          сервере.
+          Запишите фразу (например «переведи сделку … на следующий этап»). Если сделка не
+          распознается, укажите её в подсказках ниже.
         </Text>
         <Text style={styles.sectionLabel}>Подсказки</Text>
         <TextInput
@@ -1628,6 +1912,7 @@ export function HomeScreen() {
         <ExpoStatusBar style="dark" />
         {renderBitrixVoiceFullScreen()}
         {renderSubmitOverlay()}
+        {renderBitrixDealConfirmModal()}
       </View>
     );
   }
@@ -1642,10 +1927,31 @@ export function HomeScreen() {
     );
   }
 
+  if (notificationsOpen) {
+    return (
+      <View style={styles.root}>
+        <ExpoStatusBar style="dark" />
+        {renderNotificationsScreen()}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.root}>
       <ExpoStatusBar style="light" />
       <View style={[styles.header, { paddingTop: topInset + 10 }]}>
+        <Pressable onPress={() => setBitrixAuthOpen(true)} hitSlop={12} style={styles.headerSideBtn}>
+          <View>
+            <Ionicons
+              name={bitrixAuth.connected ? "person" : "person-outline"}
+              size={24}
+              color="#fff"
+            />
+            {!bitrixAuth.connected && !bitrixAuth.loading ? (
+              <View style={styles.headerAuthDot} />
+            ) : null}
+          </View>
+        </Pressable>
         <Text style={styles.headerTitle}>
           {activeTab === "home"
             ? "Главная"
@@ -1659,11 +1965,22 @@ export function HomeScreen() {
         </Text>
         <Pressable
           onPress={() => {
-            setActiveTab("more");
+            setNotificationsOpen(true);
+            void loadBitrixNotifications();
           }}
           hitSlop={12}
+          style={styles.headerSideBtn}
         >
-          <Ionicons name="notifications-outline" size={24} color="#fff" />
+          <View>
+            <Ionicons name="notifications-outline" size={24} color="#fff" />
+            {unreadNotificationCount > 0 ? (
+              <View style={styles.headerNotifDot}>
+                <Text style={styles.headerNotifDotText}>
+                  {unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}
+                </Text>
+              </View>
+            ) : null}
+          </View>
         </Pressable>
       </View>
 
@@ -1706,6 +2023,8 @@ export function HomeScreen() {
         </Pressable>
       </View>
       {renderSubmitOverlay()}
+      {renderBitrixAuthModal()}
+      {renderBitrixDealConfirmModal()}
       <BitrixTaskDetailModal
         taskId={selectedTaskId}
         visible={selectedTaskId != null}
@@ -1741,6 +2060,67 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "700",
     textAlign: "center"
+  },
+  headerSideBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    width: 32
+  },
+  headerAuthDot: {
+    backgroundColor: "#fbbf24",
+    borderColor: HEADER_BLUE,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    height: 10,
+    position: "absolute",
+    right: -2,
+    top: -2,
+    width: 10
+  },
+  headerNotifDot: {
+    alignItems: "center",
+    backgroundColor: "#ef4444",
+    borderColor: HEADER_BLUE,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    justifyContent: "center",
+    minWidth: 18,
+    paddingHorizontal: 4,
+    position: "absolute",
+    right: -8,
+    top: -6
+  },
+  headerNotifDotText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "700",
+    lineHeight: 14
+  },
+  notificationUnread: {
+    backgroundColor: "#eff6ff",
+    borderColor: "#bfdbfe",
+    borderWidth: 1
+  },
+  authOverlay: {
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 24
+  },
+  authSheet: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    gap: 12,
+    padding: 20
+  },
+  authSheetTitle: {
+    color: "#0f172a",
+    fontSize: 18,
+    fontWeight: "700"
+  },
+  authSheetClose: {
+    alignSelf: "center",
+    marginTop: 4
   },
   mainScroll: {
     flex: 1
