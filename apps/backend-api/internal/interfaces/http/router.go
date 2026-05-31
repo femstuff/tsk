@@ -31,6 +31,8 @@ func NewRouter(handler *Handler, collector *metrics.Collector) http.Handler {
 	mux.HandleFunc("GET /api/v1/mobile/bitrix-deals", handler.ListMobileBitrixDeals)
 	mux.HandleFunc("GET /api/v1/mobile/bitrix-deals/{id}", handler.GetMobileBitrixDeal)
 	mux.HandleFunc("PATCH /api/v1/mobile/bitrix-deals/{id}/stage", handler.UpdateMobileBitrixDealStage)
+	mux.HandleFunc("PATCH /api/v1/mobile/bitrix-deals/{id}", handler.UpdateMobileBitrixDealFields)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix-notifications", handler.ListMobileBitrixNotifications)
 	mux.HandleFunc("GET /api/v1/mobile/bitrix-tasks", handler.ListMobileBitrixTasks)
 	mux.HandleFunc("GET /api/v1/mobile/bitrix-tasks/{id}", handler.GetMobileBitrixTask)
 	mux.HandleFunc("PATCH /api/v1/mobile/bitrix-tasks/{id}/status", handler.UpdateMobileBitrixTaskStatus)

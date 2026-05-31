@@ -157,3 +157,38 @@ func (s *Service) UpdateBitrixDealStageForMobile(ctx context.Context, dealID str
 	}
 	return s.bitrix.GetDealDetail(ctx, dealID)
 }
+
+func (s *Service) UpdateBitrixDealFieldsForMobile(ctx context.Context, dealID string, fields map[string]string, oauthSessionID string) (bitrixclient.BitrixDealDetail, error) {
+	dealID = strings.TrimSpace(dealID)
+	if dealID == "" {
+		return bitrixclient.BitrixDealDetail{}, fmt.Errorf("deal id is required")
+	}
+	if len(fields) == 0 {
+		return bitrixclient.BitrixDealDetail{}, fmt.Errorf("fields are required")
+	}
+
+	if oauthSessionID != "" && s.BitrixOAuthEnabled() {
+		session, err := s.ensureActiveBitrixSession(ctx, oauthSessionID)
+		if err != nil {
+			return bitrixclient.BitrixDealDetail{}, err
+		}
+		tokenClient := bitrixclient.NewTokenREST(session.PortalDomain, session.RestEndpoint, session.AccessToken, s.httpClient)
+		if err := tokenClient.UpdateDealFieldsByID(ctx, dealID, fields); err == nil {
+			return tokenClient.GetDealDetail(ctx, dealID)
+		} else if s.bitrix != nil && s.bitrix.WebhookConfigured() {
+			if whErr := s.bitrix.UpdateDealFieldsByID(ctx, dealID, fields); whErr == nil {
+				return s.bitrix.GetDealDetail(ctx, dealID)
+			} else {
+				return bitrixclient.BitrixDealDetail{}, whErr
+			}
+		}
+		return bitrixclient.BitrixDealDetail{}, bitrixclient.DealsListUserError(err)
+	}
+	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		return bitrixclient.BitrixDealDetail{}, errors.New("Bitrix24 не настроен")
+	}
+	if err := s.bitrix.UpdateDealFieldsByID(ctx, dealID, fields); err != nil {
+		return bitrixclient.BitrixDealDetail{}, err
+	}
+	return s.bitrix.GetDealDetail(ctx, dealID)
+}

@@ -29,9 +29,34 @@ type BitrixDealBrief struct {
 type BitrixDealDetail struct {
 	BitrixDealBrief
 	AssignedBy   BitrixTaskPerson        `json:"assignedBy,omitempty"`
+	CreatedBy    BitrixTaskPerson        `json:"createdBy,omitempty"`
+	ModifiedBy   BitrixTaskPerson        `json:"modifiedBy,omitempty"`
 	CompanyID    string                  `json:"companyId,omitempty"`
+	CompanyTitle string                  `json:"companyTitle,omitempty"`
 	ContactID    string                  `json:"contactId,omitempty"`
+	ContactTitle string                  `json:"contactTitle,omitempty"`
+	LeadID       string                  `json:"leadId,omitempty"`
+	LeadTitle    string                  `json:"leadTitle,omitempty"`
+	QuoteID      string                  `json:"quoteId,omitempty"`
 	Comments     string                  `json:"comments,omitempty"`
+	AdditionalInfo string                `json:"additionalInfo,omitempty"`
+	TypeID       string                  `json:"typeId,omitempty"`
+	Probability  string                  `json:"probability,omitempty"`
+	TaxValue     string                  `json:"taxValue,omitempty"`
+	BeginDate    string                  `json:"beginDate,omitempty"`
+	CloseDate    string                  `json:"closeDate,omitempty"`
+	SourceID     string                  `json:"sourceId,omitempty"`
+	SourceDesc   string                  `json:"sourceDescription,omitempty"`
+	UtmSource    string                  `json:"utmSource,omitempty"`
+	UtmMedium    string                  `json:"utmMedium,omitempty"`
+	UtmCampaign  string                  `json:"utmCampaign,omitempty"`
+	UtmContent   string                  `json:"utmContent,omitempty"`
+	UtmTerm      string                  `json:"utmTerm,omitempty"`
+	Opened       bool                    `json:"opened,omitempty"`
+	IsNew        bool                    `json:"isNew,omitempty"`
+	IsRecurring  bool                    `json:"isRecurring,omitempty"`
+	IsReturnCustomer bool                `json:"isReturnCustomer,omitempty"`
+	Fields       []BitrixDealField       `json:"fields,omitempty"`
 	StageOptions []BitrixDealStageOption `json:"stageOptions"`
 }
 
@@ -44,6 +69,7 @@ type BitrixDealStageOption struct {
 type dealRESTCaller interface {
 	callDealListGET(ctx context.Context, form url.Values) (json.RawMessage, error)
 	callDealMethodPOST(ctx context.Context, method string, form url.Values) (json.RawMessage, error)
+	callStatusList(ctx context.Context, entityID string) (json.RawMessage, error)
 }
 
 type webhookDealCaller struct {
@@ -94,6 +120,31 @@ func (w *webhookDealCaller) callDealMethodPOST(ctx context.Context, method strin
 	return parseBitrixResult(body, resp.StatusCode)
 }
 
+func (w *webhookDealCaller) callStatusList(ctx context.Context, entityID string) (json.RawMessage, error) {
+	if strings.TrimSpace(w.webhookURL) == "" {
+		return nil, fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return nil, fmt.Errorf("status entity id is required")
+	}
+	endpoint := strings.TrimRight(w.webhookURL, "/") + "/crm.status.list.json?filter[ENTITY_ID]=" + url.QueryEscape(entityID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := w.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return parseBitrixResult(body, resp.StatusCode)
+}
+
 type tokenDealCaller struct {
 	token *TokenREST
 }
@@ -131,6 +182,31 @@ func (t *tokenDealCaller) callDealMethodPOST(ctx context.Context, method string,
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := t.token.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return parseBitrixResult(body, resp.StatusCode)
+}
+
+func (t *tokenDealCaller) callStatusList(ctx context.Context, entityID string) (json.RawMessage, error) {
+	if t.token == nil || !t.token.Configured() {
+		return nil, fmt.Errorf("bitrix oauth client is not configured")
+	}
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return nil, fmt.Errorf("status entity id is required")
+	}
+	endpoint := t.token.methodURL("crm.status.list") + "&filter[ENTITY_ID]=" + url.QueryEscape(entityID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := t.token.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -241,6 +317,17 @@ func (t *TokenREST) UpdateDealStageByID(ctx context.Context, dealID string, stag
 	return updateDealStageByID(ctx, &tokenDealCaller{token: t}, dealID, stageID)
 }
 
+func (c *Client) UpdateDealFieldsByID(ctx context.Context, dealID string, fields map[string]string) error {
+	if !c.WebhookConfigured() {
+		return fmt.Errorf("BITRIX_WEBHOOK_URL is empty")
+	}
+	return updateDealFieldsByID(ctx, &webhookDealCaller{webhookURL: c.webhookURL, httpClient: c.httpClient}, dealID, fields)
+}
+
+func (t *TokenREST) UpdateDealFieldsByID(ctx context.Context, dealID string, fields map[string]string) error {
+	return updateDealFieldsByID(ctx, &tokenDealCaller{token: t}, dealID, fields)
+}
+
 func listDeals(ctx context.Context, caller dealRESTCaller, limit int, search string, filterUserID int, filterField string) ([]BitrixDealBrief, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
@@ -312,41 +399,11 @@ func getDealDetail(ctx context.Context, caller dealRESTCaller, dealID string) (B
 		return BitrixDealDetail{}, fmt.Errorf("deal id is required")
 	}
 
-	form := url.Values{}
-	form.Set("id", dealID)
-	raw, err := caller.callDealMethodPOST(ctx, "crm.deal.get", form)
+	row, err := fetchFullDealRow(ctx, caller, dealID)
 	if err != nil {
 		return BitrixDealDetail{}, err
 	}
-
-	var row map[string]any
-	if err := json.Unmarshal(raw, &row); err != nil {
-		return BitrixDealDetail{}, err
-	}
-	brief := mapRowToDealBrief(row)
-	enriched, _ := enrichDealsWithStageLabels(ctx, caller, []BitrixDealBrief{brief})
-	if len(enriched) > 0 {
-		brief = enriched[0]
-	}
-	detail := BitrixDealDetail{
-		BitrixDealBrief: brief,
-		CompanyID:       fieldFromRow(row, "COMPANY_ID", "companyId"),
-		ContactID:       fieldFromRow(row, "CONTACT_ID", "contactId"),
-		Comments:        fieldFromRow(row, "COMMENTS", "comments"),
-	}
-	if brief.AssignedByID != "" {
-		detail.AssignedBy = lookupBitrixUser(ctx, caller, brief.AssignedByID)
-		if detail.AssignedBy.ID == "" {
-			detail.AssignedBy.ID = brief.AssignedByID
-		}
-	}
-	if cat := strings.TrimSpace(detail.CategoryID); cat != "" {
-		categoryID, _ := strconv.Atoi(cat)
-		if categoryID >= 0 {
-			detail.StageOptions, _ = listDealStageOptions(ctx, caller, categoryID)
-		}
-	}
-	return detail, nil
+	return buildDealDetailFromRow(ctx, caller, row)
 }
 
 func updateDealStageByID(ctx context.Context, caller dealRESTCaller, dealID string, stageID string) error {
@@ -358,6 +415,35 @@ func updateDealStageByID(ctx context.Context, caller dealRESTCaller, dealID stri
 	form := url.Values{}
 	form.Set("id", dealID)
 	form.Set("fields[STAGE_ID]", stageID)
+	_, err := caller.callDealMethodPOST(ctx, "crm.deal.update", form)
+	return err
+}
+
+func updateDealFieldsByID(ctx context.Context, caller dealRESTCaller, dealID string, fields map[string]string) error {
+	dealID = strings.TrimSpace(dealID)
+	if dealID == "" {
+		return fmt.Errorf("deal id is required")
+	}
+	if len(fields) == 0 {
+		return fmt.Errorf("no fields to update")
+	}
+	form := url.Values{}
+	form.Set("id", dealID)
+	wrote := 0
+	for key, value := range fields {
+		key = strings.TrimSpace(strings.ToUpper(key))
+		if key == "" {
+			continue
+		}
+		if _, skip := dealReadOnlyFieldKeys[key]; skip {
+			continue
+		}
+		form.Set("fields["+key+"]", value)
+		wrote++
+	}
+	if wrote == 0 {
+		return fmt.Errorf("no editable fields in request")
+	}
 	_, err := caller.callDealMethodPOST(ctx, "crm.deal.update", form)
 	return err
 }
@@ -423,11 +509,15 @@ func mapRowsToDealBriefs(rows []map[string]any) []BitrixDealBrief {
 }
 
 func mapRowToDealBrief(row map[string]any) BitrixDealBrief {
+	categoryID := dealFieldRaw(row, "CATEGORY_ID", "categoryId")
+	if categoryID == "" {
+		categoryID = "0"
+	}
 	return BitrixDealBrief{
 		ID:           fieldFromRow(row, "ID", "id"),
 		Title:        fieldFromRow(row, "TITLE", "title"),
 		StageID:      fieldFromRow(row, "STAGE_ID", "stageId"),
-		CategoryID:   fieldFromRow(row, "CATEGORY_ID", "categoryId"),
+		CategoryID:   categoryID,
 		Opportunity:  fieldFromRow(row, "OPPORTUNITY", "opportunity"),
 		CurrencyID:   fieldFromRow(row, "CURRENCY_ID", "currencyId"),
 		AssignedByID: fieldFromRow(row, "ASSIGNED_BY_ID", "assignedById"),
@@ -464,21 +554,112 @@ func enrichDealsWithStageLabels(ctx context.Context, caller dealRESTCaller, deal
 	return deals, nil
 }
 
+func dealFieldRaw(row map[string]any, keys ...string) string {
+	for _, want := range keys {
+		for k, v := range row {
+			if strings.EqualFold(k, want) && v != nil {
+				return strings.TrimSpace(fmt.Sprint(v))
+			}
+		}
+	}
+	return ""
+}
+
+func resolveDealCategoryID(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	id, err := strconv.Atoi(raw)
+	if err != nil || id < 0 {
+		return 0
+	}
+	return id
+}
+
 func listDealStageOptions(ctx context.Context, caller dealRESTCaller, categoryID int) ([]BitrixDealStageOption, error) {
-	form := url.Values{}
-	form.Set("filter[ENTITY_ID]", dealStageEntityID(categoryID))
-	raw, err := caller.callDealMethodPOST(ctx, "crm.status.list", form)
+	if categoryID < 0 {
+		categoryID = 0
+	}
+
+	entityIDs := []string{dealStageEntityID(categoryID)}
+	if categoryID != 0 {
+		entityIDs = append(entityIDs, "DEAL_STAGE")
+	}
+
+	var lastErr error
+	for _, entityID := range entityIDs {
+		items, err := fetchDealStatusListItems(ctx, caller, entityID)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		options := mapStatusItemsToStageOptions(items, categoryID)
+		if len(options) > 0 {
+			return options, nil
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return []BitrixDealStageOption{}, nil
+}
+
+func fetchDealStatusListItems(ctx context.Context, caller dealRESTCaller, entityID string) ([]map[string]any, error) {
+	raw, err := caller.callStatusList(ctx, entityID)
 	if err != nil {
-		return nil, err
+		form := url.Values{}
+		form.Set("filter[ENTITY_ID]", entityID)
+		raw, err = caller.callDealMethodPOST(ctx, "crm.status.list", form)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return parseStatusListItems(raw)
+}
+
+func parseStatusListItems(raw json.RawMessage) ([]map[string]any, error) {
+	raw = json.RawMessage(bytesTrimJSON(raw))
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("empty crm.status.list result")
 	}
 
 	var items []map[string]any
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil, err
+	if err := json.Unmarshal(raw, &items); err == nil {
+		return items, nil
 	}
 
+	var wrapped struct {
+		Statuses []map[string]any `json:"statuses"`
+		Items    []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil {
+		if len(wrapped.Statuses) > 0 {
+			return wrapped.Statuses, nil
+		}
+		if len(wrapped.Items) > 0 {
+			return wrapped.Items, nil
+		}
+	}
+
+	return nil, fmt.Errorf("unexpected crm.status.list result shape: %s", strings.TrimSpace(string(raw)))
+}
+
+func bytesTrimJSON(raw json.RawMessage) json.RawMessage {
+	return json.RawMessage(strings.TrimSpace(string(raw)))
+}
+
+func mapStatusItemsToStageOptions(items []map[string]any, categoryID int) []BitrixDealStageOption {
+	wantCategory := strconv.Itoa(categoryID)
 	options := make([]BitrixDealStageOption, 0, len(items))
 	for _, item := range items {
+		itemCategory := dealFieldRaw(item, "CATEGORY_ID", "categoryId")
+		if itemCategory == "" {
+			itemCategory = "0"
+		}
+		if itemCategory != wantCategory {
+			continue
+		}
 		id := fieldFromRow(item, "STATUS_ID", "statusId", "ID", "id")
 		label := fieldFromRow(item, "NAME", "name")
 		if label == "" {
@@ -496,62 +677,36 @@ func listDealStageOptions(ctx context.Context, caller dealRESTCaller, categoryID
 		}
 		return options[i].Label < options[j].Label
 	})
-	return options, nil
-}
-
-func lookupBitrixUser(ctx context.Context, caller dealRESTCaller, userID string) BitrixTaskPerson {
-	userID = strings.TrimSpace(userID)
-	if userID == "" {
-		return BitrixTaskPerson{}
-	}
-
-	form := url.Values{}
-	form.Set("ID", userID)
-	raw, err := caller.callDealMethodPOST(ctx, "user.get", form)
-	if err != nil {
-		return BitrixTaskPerson{ID: userID}
-	}
-
-	var users []map[string]any
-	if err := json.Unmarshal(raw, &users); err == nil && len(users) > 0 {
-		return bitrixUserPerson(users[0], userID)
-	}
-
-	var user map[string]any
-	if err := json.Unmarshal(raw, &user); err == nil && len(user) > 0 {
-		return bitrixUserPerson(user, userID)
-	}
-
-	return BitrixTaskPerson{ID: userID}
-}
-
-func bitrixUserPerson(row map[string]any, fallbackID string) BitrixTaskPerson {
-	name := userDisplayNameFromRow(row)
-	id := fieldFromRow(row, "ID", "id")
-	if id == "" {
-		id = fallbackID
-	}
-	position := strings.TrimSpace(fieldFromRow(row, "WORK_POSITION", "workPosition"))
-	return BitrixTaskPerson{ID: id, Name: name, WorkPosition: position}
+	return options
 }
 
 func userDisplayNameFromRow(row map[string]any) string {
 	if formatted := strings.TrimSpace(fieldFromRow(row, "formattedName", "FORMATTED_NAME")); formatted != "" {
 		return formatted
 	}
+	last := strings.TrimSpace(fieldFromRow(row, "LAST_NAME", "lastName"))
 	first := strings.TrimSpace(fieldFromRow(row, "NAME", "name"))
-	last := strings.TrimSpace(fieldFromRow(row, "LAST_NAME", "lastName", "LAST_NAME"))
-	second := strings.TrimSpace(fieldFromRow(row, "SECOND_NAME", "secondName", "SECOND_NAME"))
-	switch {
-	case first != "" && last != "":
-		return strings.TrimSpace(first + " " + last)
-	case last != "":
-		return last
-	case first != "":
-		return first
-	case second != "":
-		return second
-	default:
-		return ""
+	second := strings.TrimSpace(fieldFromRow(row, "SECOND_NAME", "secondName"))
+	parts := make([]string, 0, 3)
+	if last != "" {
+		parts = append(parts, last)
 	}
+	if first != "" {
+		parts = append(parts, first)
+	}
+	if second != "" {
+		parts = append(parts, second)
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, " ")
+	}
+	if login := strings.TrimSpace(fieldFromRow(row, "LOGIN", "login")); login != "" {
+		return login
+	}
+	return ""
+}
+
+func lookupBitrixUser(ctx context.Context, caller dealRESTCaller, userID string) BitrixTaskPerson {
+	cache := newBitrixUserCache(dealRESTUserPoster{caller: caller})
+	return cache.Resolve(ctx, userID)
 }

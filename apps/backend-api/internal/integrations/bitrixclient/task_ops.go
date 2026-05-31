@@ -40,16 +40,28 @@ type BitrixTaskDetail struct {
 	StartDatePlan string `json:"startDatePlan,omitempty"`
 	EndDatePlan   string `json:"endDatePlan,omitempty"`
 
-	GroupID       string            `json:"groupId,omitempty"`
-	StageID       string            `json:"stageId,omitempty"`
-	ParentID      string            `json:"parentId,omitempty"`
-	CommentsCount string            `json:"commentsCount,omitempty"`
-	TimeEstimate  string            `json:"timeEstimate,omitempty"`
-	DurationFact  string            `json:"durationFact,omitempty"`
-	Tags          []string          `json:"tags,omitempty"`
-	CrmLinks      []string          `json:"crmLinks,omitempty"`
-	Favorite      bool              `json:"favorite,omitempty"`
-	AvailableActions map[string]bool `json:"availableActions,omitempty"`
+	GroupID          string            `json:"groupId,omitempty"`
+	GroupTitle       string            `json:"groupTitle,omitempty"`
+	StageID          string            `json:"stageId,omitempty"`
+	StageLabel       string            `json:"stageLabel,omitempty"`
+	ParentID         string            `json:"parentId,omitempty"`
+	ParentTitle      string            `json:"parentTitle,omitempty"`
+	CommentsCount    string            `json:"commentsCount,omitempty"`
+	TimeEstimate     string            `json:"timeEstimate,omitempty"`
+	DurationFact     string            `json:"durationFact,omitempty"`
+	DurationPlan     string            `json:"durationPlan,omitempty"`
+	DurationType     string            `json:"durationType,omitempty"`
+	Tags             []string          `json:"tags,omitempty"`
+	CrmLinks         []string          `json:"crmLinks,omitempty"`
+	Favorite         bool              `json:"favorite,omitempty"`
+	AllowTimeTracking bool             `json:"allowTimeTracking,omitempty"`
+	TaskControl      bool              `json:"taskControl,omitempty"`
+	Multitask        bool              `json:"multitask,omitempty"`
+	ForumTopicID     string            `json:"forumTopicId,omitempty"`
+	AvailableActions map[string]bool   `json:"availableActions,omitempty"`
+	Checklist        []BitrixTaskChecklistItem `json:"checklist,omitempty"`
+	Files            []BitrixTaskFile          `json:"files,omitempty"`
+	Comments         []BitrixTaskComment       `json:"comments,omitempty"`
 }
 
 var taskGetSelectFields = []string{
@@ -58,8 +70,9 @@ var taskGetSelectFields = []string{
 	"RESPONSIBLE_ID", "ACCOMPLICES", "AUDITORS",
 	"DEADLINE", "CLOSED_DATE", "DATE_START", "START_DATE_PLAN", "END_DATE_PLAN",
 	"GROUP_ID", "STAGE_ID", "PARENT_ID",
-	"COMMENTS_COUNT", "TIME_ESTIMATE", "DURATION_FACT",
-	"TAGS", "UF_CRM_TASK", "FAVORITE",
+	"COMMENTS_COUNT", "TIME_ESTIMATE", "DURATION_FACT", "DURATION_PLAN", "DURATION_TYPE",
+	"TAGS", "UF_CRM_TASK", "UF_TASK_WEBDAV_FILES", "FAVORITE",
+	"ALLOW_TIME_TRACKING", "TASK_CONTROL", "MULTITASK", "FORUM_TOPIC_ID", "CHECKLIST",
 }
 
 func personFromMap(m map[string]any) BitrixTaskPerson {
@@ -228,16 +241,24 @@ func mapRowToTaskDetail(row map[string]any) BitrixTaskDetail {
 		StartDatePlan: fieldFromRow(row, "startDatePlan", "START_DATE_PLAN"),
 		EndDatePlan:   fieldFromRow(row, "endDatePlan", "END_DATE_PLAN"),
 
-		GroupID:       fieldFromRow(row, "groupId", "GROUP_ID"),
-		StageID:       fieldFromRow(row, "stageId", "STAGE_ID"),
-		ParentID:      fieldFromRow(row, "parentId", "PARENT_ID"),
-		CommentsCount: fieldFromRow(row, "commentsCount", "COMMENTS_COUNT"),
-		TimeEstimate:  fieldFromRow(row, "timeEstimate", "TIME_ESTIMATE"),
-		DurationFact:  fieldFromRow(row, "durationFact", "DURATION_FACT"),
-		Tags:          stringsFromAny(rowValueCI(row, "tags", "TAGS")),
-		CrmLinks:      stringsFromAny(rowValueCI(row, "ufCrmTask", "UF_CRM_TASK")),
-		Favorite:      boolFromRow(row, "favorite", "FAVORITE"),
-		AvailableActions: actionsFromRow(row),
+		GroupID:           fieldFromRow(row, "groupId", "GROUP_ID"),
+		StageID:           fieldFromRow(row, "stageId", "STAGE_ID"),
+		ParentID:          fieldFromRow(row, "parentId", "PARENT_ID"),
+		CommentsCount:     fieldFromRow(row, "commentsCount", "COMMENTS_COUNT"),
+		TimeEstimate:      fieldFromRow(row, "timeEstimate", "TIME_ESTIMATE"),
+		DurationFact:      fieldFromRow(row, "durationFact", "DURATION_FACT"),
+		DurationPlan:      fieldFromRow(row, "durationPlan", "DURATION_PLAN"),
+		DurationType:      fieldFromRow(row, "durationType", "DURATION_TYPE"),
+		Tags:              stringsFromAny(rowValueCI(row, "tags", "TAGS")),
+		CrmLinks:          stringsFromAny(rowValueCI(row, "ufCrmTask", "UF_CRM_TASK")),
+		Favorite:          boolFromRow(row, "favorite", "FAVORITE"),
+		AllowTimeTracking: boolFromRow(row, "allowTimeTracking", "ALLOW_TIME_TRACKING"),
+		TaskControl:       boolFromRow(row, "taskControl", "TASK_CONTROL"),
+		Multitask:         boolFromRow(row, "multitask", "MULTITASK"),
+		ForumTopicID:      fieldFromRow(row, "forumTopicId", "FORUM_TOPIC_ID"),
+		AvailableActions:  actionsFromRow(row),
+		Checklist:         checklistFromRow(row),
+		Files:             filesFromTaskRow(row),
 	}
 }
 
@@ -373,7 +394,12 @@ func updateTaskStatusVia(ctx context.Context, poster bitrixRESTPoster, taskID st
 
 // GetTask — карточка задачи через входящий вебхук.
 func (c *Client) GetTask(ctx context.Context, taskID string) (BitrixTaskDetail, error) {
-	return getTaskVia(ctx, webhookREST{webhookURL: c.webhookURL, httpClient: c.httpClient}, taskID)
+	poster := webhookREST{webhookURL: c.webhookURL, httpClient: c.httpClient}
+	detail, err := getTaskVia(ctx, poster, taskID)
+	if err != nil {
+		return detail, err
+	}
+	return enrichTaskDetail(ctx, poster, taskID, detail, portalHostFromWebhookURL(c.webhookURL)), nil
 }
 
 // UpdateTaskStatus — смена статуса задачи через вебхук.
@@ -383,7 +409,16 @@ func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status int
 
 // GetTask — карточка задачи от имени OAuth-пользователя.
 func (t *TokenREST) GetTask(ctx context.Context, taskID string) (BitrixTaskDetail, error) {
-	return getTaskVia(ctx, tokenRESTPoster{token: t}, taskID)
+	poster := tokenRESTPoster{token: t}
+	detail, err := getTaskVia(ctx, poster, taskID)
+	if err != nil {
+		return detail, err
+	}
+	host := ""
+	if parsed, err := url.Parse(t.restBase); err == nil {
+		host = parsed.Host
+	}
+	return enrichTaskDetail(ctx, poster, taskID, detail, host), nil
 }
 
 // UpdateTaskStatus — смена статуса задачи от имени OAuth-пользователя.

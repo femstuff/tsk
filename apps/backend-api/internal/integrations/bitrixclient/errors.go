@@ -67,3 +67,19 @@ func HasTaskScope(scope string) bool {
 	}
 	return false
 }
+
+// NotifyListUserError переводит ответ Bitrix REST по уведомлениям.
+func NotifyListUserError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "insufficient_scope"):
+		return fmt.Errorf("нет прав «Чат и уведомления (im)» у OAuth-приложения Bitrix24. Включите scope im и notifications, затем перелогиньтесь")
+	case strings.Contains(msg, "invalid_scope"):
+		return fmt.Errorf("запрошенные права уведомлений превышают настройки локального приложения Bitrix24")
+	default:
+		return err
+	}
+}

@@ -253,11 +253,14 @@ func parseTaskAddResultID(raw json.RawMessage) (string, error) {
 
 // BitrixTaskBrief — краткая запись из tasks.task.list (вебхук = контекст пользователя, создавшего вебхук).
 type BitrixTaskBrief struct {
-	ID         string `json:"id"`
-	Title      string `json:"title"`
-	Status     string `json:"status"`
-	Deadline   string `json:"deadline,omitempty"`
-	ClosedDate string `json:"closedDate,omitempty"`
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	Status        string `json:"status"`
+	Deadline      string `json:"deadline,omitempty"`
+	ClosedDate    string `json:"closedDate,omitempty"`
+	CreatedDate   string `json:"createdDate,omitempty"`
+	ChangedDate   string `json:"changedDate,omitempty"`
+	ResponsibleID string `json:"responsibleId,omitempty"`
 }
 
 // ListTasks возвращает последние задачи (без фильтра по ответственному — устаревший режим).
@@ -289,7 +292,10 @@ func (c *Client) listTasksPOST(ctx context.Context, responsibleID int, limit int
 	form.Add("select[]", "STATUS")
 	form.Add("select[]", "DEADLINE")
 	form.Add("select[]", "CLOSED_DATE")
-	form.Set("order[ID]", "desc")
+	form.Add("select[]", "CREATED_DATE")
+	form.Add("select[]", "CHANGED_DATE")
+	form.Add("select[]", "RESPONSIBLE_ID")
+	form.Set("order[CHANGED_DATE]", "desc")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.webhookURL+"/tasks.task.list.json", strings.NewReader(form.Encode()))
 	if err != nil {
@@ -327,6 +333,7 @@ func (c *Client) listTasksPOST(ctx context.Context, responsibleID int, limit int
 	if err != nil {
 		return nil, err
 	}
+	sortBitrixTasksByRecency(tasks)
 	if len(tasks) > limit {
 		tasks = tasks[:limit]
 	}
@@ -368,9 +375,28 @@ func mapSliceToTaskBriefs(rows []map[string]any) []BitrixTaskBrief {
 		out = append(out, BitrixTaskBrief{
 			ID: id, Title: strings.TrimSpace(title), Status: status,
 			Deadline: deadline, ClosedDate: closed,
+			CreatedDate:   fieldFromRow(row, "createdDate", "CREATED_DATE"),
+			ChangedDate:   fieldFromRow(row, "changedDate", "CHANGED_DATE"),
+			ResponsibleID: fieldFromRow(row, "responsibleId", "RESPONSIBLE_ID"),
 		})
 	}
 	return out
+}
+
+func bitrixTaskRecencyKey(task BitrixTaskBrief) string {
+	if changed := strings.TrimSpace(task.ChangedDate); changed != "" {
+		return changed
+	}
+	if created := strings.TrimSpace(task.CreatedDate); created != "" {
+		return created
+	}
+	return task.ID
+}
+
+func sortBitrixTasksByRecency(tasks []BitrixTaskBrief) {
+	sort.Slice(tasks, func(i, j int) bool {
+		return bitrixTaskRecencyKey(tasks[i]) > bitrixTaskRecencyKey(tasks[j])
+	})
 }
 
 func fieldFromRow(row map[string]any, keys ...string) string {

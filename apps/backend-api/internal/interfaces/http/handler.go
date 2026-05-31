@@ -52,8 +52,10 @@ func (h *Handler) Root(w http.ResponseWriter, r *http.Request) {
 			"mobileBitrixIntent":     "POST /api/v1/mobile/bitrix-intent",
 			"mobileBitrixTasks":      "GET /api/v1/mobile/bitrix-tasks",
 			"mobileBitrixDeals":      "GET /api/v1/mobile/bitrix-deals",
+			"mobileBitrixNotifications": "GET /api/v1/mobile/bitrix-notifications",
 			"mobileBitrixDeal":       "GET /api/v1/mobile/bitrix-deals/{id}",
 			"mobileBitrixDealStage":  "PATCH /api/v1/mobile/bitrix-deals/{id}/stage",
+			"mobileBitrixDealFields": "PATCH /api/v1/mobile/bitrix-deals/{id}",
 			"sourceDocuments":        "/api/v1/source-documents",
 			"sourceDocumentDownload": "/api/v1/source-documents/{id}/download",
 			"generatedDocuments":     "/api/v1/generated-documents",
@@ -434,6 +436,26 @@ func (h *Handler) ListMobileBitrixDeals(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (h *Handler) ListMobileBitrixNotifications(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	bundle, err := h.service.ListBitrixNotificationsForMobile(r.Context(), limit, r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"items":    bundle.Items,
+		"authMode": bundle.AuthMode,
+	})
+}
+
 func (h *Handler) GetMobileBitrixDeal(w http.ResponseWriter, r *http.Request) {
 	dealID := strings.TrimSpace(r.PathValue("id"))
 	if dealID == "" {
@@ -470,6 +492,34 @@ func (h *Handler) UpdateMobileBitrixDealStage(w http.ResponseWriter, r *http.Req
 	}
 
 	detail, err := h.service.UpdateBitrixDealStageForMobile(r.Context(), dealID, body.StageID, r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": detail})
+}
+
+func (h *Handler) UpdateMobileBitrixDealFields(w http.ResponseWriter, r *http.Request) {
+	dealID := strings.TrimSpace(r.PathValue("id"))
+	if dealID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "deal id is required")
+		return
+	}
+
+	var body struct {
+		Fields map[string]string `json:"fields"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	if len(body.Fields) == 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "fields are required")
+		return
+	}
+
+	detail, err := h.service.UpdateBitrixDealFieldsForMobile(r.Context(), dealID, body.Fields, r.Header.Get(app.BitrixSessionHeaderName()))
 	if err != nil {
 		h.writeDomainError(w, err)
 		return

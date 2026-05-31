@@ -13,7 +13,12 @@ func TestUserDisplayNameFromRow(t *testing.T) {
 		{
 			name: "first and last",
 			row:  map[string]any{"NAME": "Иван", "LAST_NAME": "Петров"},
-			want: "Иван Петров",
+			want: "Петров Иван",
+		},
+		{
+			name: "full fio",
+			row:  map[string]any{"NAME": "Иван", "LAST_NAME": "Петров", "SECOND_NAME": "Сергеевич"},
+			want: "Петров Иван Сергеевич",
 		},
 		{
 			name: "formatted",

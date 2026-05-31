@@ -79,6 +79,32 @@ export type BitrixTaskPerson = {
   workPosition?: string;
 };
 
+export type BitrixTaskFile = {
+  id?: string;
+  name?: string;
+  size?: string;
+  downloadUrl?: string;
+  viewUrl?: string;
+};
+
+export type BitrixTaskComment = {
+  id: string;
+  authorId?: string;
+  authorName?: string;
+  postDate?: string;
+  message: string;
+  files?: BitrixTaskFile[];
+};
+
+export type BitrixTaskChecklistItem = {
+  id?: string;
+  title: string;
+  isComplete: boolean;
+  sortIndex?: number;
+};
+
+export type BitrixTaskFilterKey = "all" | "open" | "in_progress" | "overdue";
+
 /** Задача из Bitrix24 (контекст вебхука на сервере). */
 export type BitrixTaskSummary = {
   id: string;
@@ -86,6 +112,9 @@ export type BitrixTaskSummary = {
   status: string;
   deadline?: string;
   closedDate?: string;
+  createdDate?: string;
+  changedDate?: string;
+  responsibleId?: string;
 };
 
 export type BitrixTaskDetail = BitrixTaskSummary & {
@@ -102,15 +131,27 @@ export type BitrixTaskDetail = BitrixTaskSummary & {
   startDatePlan?: string;
   endDatePlan?: string;
   groupId?: string;
+  groupTitle?: string;
   stageId?: string;
+  stageLabel?: string;
   parentId?: string;
+  parentTitle?: string;
   commentsCount?: string;
   timeEstimate?: string;
   durationFact?: string;
+  durationPlan?: string;
+  durationType?: string;
   tags?: string[];
   crmLinks?: string[];
   favorite?: boolean;
+  allowTimeTracking?: boolean;
+  taskControl?: boolean;
+  multitask?: boolean;
+  forumTopicId?: string;
   availableActions?: Record<string, boolean>;
+  checklist?: BitrixTaskChecklistItem[];
+  files?: BitrixTaskFile[];
+  comments?: BitrixTaskComment[];
 };
 
 export type BitrixTaskStats = {
@@ -145,16 +186,71 @@ export type BitrixDealStageOption = {
   label: string;
 };
 
+export type BitrixDealFieldOption = {
+  id: string;
+  label: string;
+};
+
+export type BitrixDealField = {
+  key: string;
+  label: string;
+  value: string;
+  rawValue?: string;
+  editable?: boolean;
+  type?: string;
+  options?: BitrixDealFieldOption[];
+};
+
 export type BitrixDealDetail = BitrixDealSummary & {
   assignedBy?: BitrixTaskPerson;
+  createdBy?: BitrixTaskPerson;
+  modifiedBy?: BitrixTaskPerson;
   companyId?: string;
+  companyTitle?: string;
   contactId?: string;
+  contactTitle?: string;
+  leadId?: string;
+  leadTitle?: string;
+  quoteId?: string;
   comments?: string;
+  additionalInfo?: string;
+  typeId?: string;
+  probability?: string;
+  taxValue?: string;
+  beginDate?: string;
+  closeDate?: string;
+  sourceId?: string;
+  sourceDescription?: string;
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  utmContent?: string;
+  utmTerm?: string;
+  opened?: boolean;
+  isNew?: boolean;
+  isRecurring?: boolean;
+  isReturnCustomer?: boolean;
+  fields?: BitrixDealField[];
   stageOptions?: BitrixDealStageOption[];
 };
 
 export type BitrixDealsBundle = {
   items: BitrixDealSummary[];
+  authMode?: string;
+};
+
+export type BitrixNotificationSummary = {
+  id: string;
+  title?: string;
+  text: string;
+  date: string;
+  read: boolean;
+  module?: string;
+  tag?: string;
+};
+
+export type BitrixNotificationsBundle = {
+  items: BitrixNotificationSummary[];
   authMode?: string;
 };
 

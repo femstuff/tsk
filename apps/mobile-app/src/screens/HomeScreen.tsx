@@ -19,6 +19,8 @@ import {
 
 import type {
   BitrixDealSummary,
+  BitrixNotificationSummary,
+  BitrixTaskFilterKey,
   BitrixTaskStats,
   BitrixTaskSummary,
   DocumentJobSummary,
@@ -33,6 +35,7 @@ import {
   getHealth,
   getMobileApiBaseUrl,
   listBitrixDeals,
+  listBitrixNotifications,
   listBitrixTasks,
   listJobs,
   listSourceDocuments,
@@ -48,7 +51,7 @@ import {
 import { useBitrixAuth } from "../features/bitrix/useBitrixAuth";
 import { BitrixDealDetailModal } from "../features/bitrix/BitrixDealDetailModal";
 import { BitrixTaskDetailModal } from "../features/bitrix/BitrixTaskDetailModal";
-import { bitrixTaskStatusRu } from "../features/bitrix/bitrixTaskUi";
+import { bitrixTaskFilterLabel, bitrixTaskMatchesFilter, bitrixTaskStatusRu, formatBitrixDate, pickLatestAssignedBitrixTask } from "../features/bitrix/bitrixTaskUi";
 
 const HEADER_BLUE = "#2563eb";
 const BG = "#e8eef5";
@@ -135,6 +138,11 @@ export function HomeScreen() {
   const [bitrixResponsibleId, setBitrixResponsibleId] = useState<number | null>(null);
   const [bitrixAuthMode, setBitrixAuthMode] = useState<string | null>(null);
   const [bitrixTasksError, setBitrixTasksError] = useState<string | null>(null);
+  const [bitrixTaskFilter, setBitrixTaskFilter] = useState<BitrixTaskFilterKey>("all");
+  const [bitrixNotifications, setBitrixNotifications] = useState<BitrixNotificationSummary[]>([]);
+  const [bitrixNotificationsError, setBitrixNotificationsError] = useState<string | null>(null);
+  const [bitrixNotificationsLoading, setBitrixNotificationsLoading] = useState(false);
+  const [bitrixNotificationsAuthMode, setBitrixNotificationsAuthMode] = useState<string | null>(null);
   const [bitrixDeals, setBitrixDeals] = useState<BitrixDealSummary[]>([]);
   const [bitrixDealsError, setBitrixDealsError] = useState<string | null>(null);
   const [bitrixDealsSearch, setBitrixDealsSearch] = useState("");
@@ -251,6 +259,24 @@ export function HomeScreen() {
     };
   }, [clearSubmitProgressTimers]);
 
+  const loadBitrixNotifications = useCallback(async () => {
+    setBitrixNotificationsLoading(true);
+    setBitrixNotificationsError(null);
+    try {
+      const bundle = await listBitrixNotifications(100);
+      setBitrixNotifications(Array.isArray(bundle.items) ? bundle.items : []);
+      setBitrixNotificationsAuthMode(typeof bundle.authMode === "string" ? bundle.authMode : null);
+    } catch (err) {
+      setBitrixNotifications([]);
+      setBitrixNotificationsAuthMode(null);
+      setBitrixNotificationsError(
+        err instanceof Error ? err.message : "Не удалось загрузить уведомления Bitrix24"
+      );
+    } finally {
+      setBitrixNotificationsLoading(false);
+    }
+  }, []);
+
   const loadBitrixDeals = useCallback(async (search: string, refresh = false) => {
     setBitrixDealsLoading(true);
     setBitrixDealsError(null);
@@ -314,13 +340,14 @@ export function HomeScreen() {
       }
 
       await loadBitrixDeals(bitrixDealsSearch, Boolean(options?.pull));
+      await loadBitrixNotifications();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Ошибка загрузки");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [bitrixDealsSearch, loadBitrixDeals]);
+  }, [bitrixDealsSearch, loadBitrixDeals, loadBitrixNotifications]);
 
   const openTaskDetail = useCallback((taskId: string) => {
     setSelectedTaskId(taskId);
@@ -403,8 +430,13 @@ export function HomeScreen() {
     return newestFirst.filter((e) => e.kind === logFilter);
   }, [requestLogEntries, logFilter]);
 
+  const latestAssignedBitrixTask = useMemo(
+    () => pickLatestAssignedBitrixTask(bitrixTasks, bitrixResponsibleId),
+    [bitrixTasks, bitrixResponsibleId]
+  );
+
   const notificationPreview = useMemo(() => {
-    const t = bitrixTasks[0];
+    const t = latestAssignedBitrixTask;
     if (t?.title) {
       return t.title.length > 72 ? `${t.title.slice(0, 72)}…` : t.title;
     }
@@ -412,7 +444,23 @@ export function HomeScreen() {
       return `${jobs[0].templateName}: ${jobs[0].status}`;
     }
     return "Нет свежих задач из Bitrix";
-  }, [bitrixTasks, jobs]);
+  }, [latestAssignedBitrixTask, jobs]);
+
+  const filteredBitrixTasks = useMemo(
+    () => bitrixTasks.filter((task) => bitrixTaskMatchesFilter(task, bitrixTaskFilter)),
+    [bitrixTasks, bitrixTaskFilter]
+  );
+
+  const applyTaskFilter = useCallback((filter: BitrixTaskFilterKey) => {
+    setBitrixTaskFilter((current) => (current === filter ? "all" : filter));
+    setActiveTab("tasks");
+  }, []);
+
+  const taskStatBoxStyle = useCallback(
+    (filter: BitrixTaskFilterKey) =>
+      bitrixTaskFilter === filter ? [styles.bitrixStatBox, styles.bitrixStatBoxActive] : styles.bitrixStatBox,
+    [bitrixTaskFilter]
+  );
 
   // Эмулятор Android Studio: ⋯ → Extended controls → Microphone → Virtual headset (или микрофон ПК);
   // при глюках — Cold Boot AVD; в системных настройках приложения включите RECORD_AUDIO.
@@ -994,17 +1042,17 @@ export function HomeScreen() {
         </Text>
         {bitrixTaskStats ? (
           <View style={styles.bitrixStatsRow}>
-            <Pressable style={styles.bitrixStatBox} onPress={() => setActiveTab("tasks")}>
+            <Pressable style={taskStatBoxStyle("open")} onPress={() => applyTaskFilter("open")}>
               <Text style={styles.bitrixStatNum}>{bitrixTaskStats.totalOpen}</Text>
               <Text style={styles.bitrixStatLabel}>Открыто</Text>
             </Pressable>
-            <Pressable style={styles.bitrixStatBox} onPress={() => setActiveTab("tasks")}>
+            <Pressable style={taskStatBoxStyle("in_progress")} onPress={() => applyTaskFilter("in_progress")}>
               <Text style={[styles.bitrixStatNum, { color: "#0369a1" }]}>
                 {bitrixTaskStats.inProgress}
               </Text>
               <Text style={styles.bitrixStatLabel}>В работе</Text>
             </Pressable>
-            <Pressable style={styles.bitrixStatBox} onPress={() => setActiveTab("tasks")}>
+            <Pressable style={taskStatBoxStyle("overdue")} onPress={() => applyTaskFilter("overdue")}>
               <Text style={[styles.bitrixStatNum, { color: "#b91c1c" }]}>
                 {bitrixTaskStats.overdue}
               </Text>
@@ -1062,8 +1110,8 @@ export function HomeScreen() {
         <Pressable
           style={styles.notifRow}
           onPress={() => {
-            if (bitrixTasks[0]?.id) {
-              openTaskDetail(bitrixTasks[0].id);
+            if (latestAssignedBitrixTask?.id) {
+              openTaskDetail(latestAssignedBitrixTask.id);
             } else {
               setActiveTab("tasks");
             }
@@ -1082,6 +1130,8 @@ export function HomeScreen() {
           </Pressable>
         </View>
       ) : null}
+
+      {renderBitrixNotificationsCard()}
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Сервер</Text>
@@ -1106,34 +1156,47 @@ export function HomeScreen() {
         </Text>
         {bitrixTaskStats ? (
           <View style={styles.bitrixStatsRow}>
-            <View style={styles.bitrixStatBox}>
+            <Pressable style={taskStatBoxStyle("open")} onPress={() => applyTaskFilter("open")}>
               <Text style={styles.bitrixStatNum}>{bitrixTaskStats.totalOpen}</Text>
               <Text style={styles.bitrixStatLabel}>Открыто</Text>
-            </View>
-            <View style={styles.bitrixStatBox}>
+            </Pressable>
+            <Pressable style={taskStatBoxStyle("in_progress")} onPress={() => applyTaskFilter("in_progress")}>
               <Text style={[styles.bitrixStatNum, { color: "#0369a1" }]}>
                 {bitrixTaskStats.inProgress}
               </Text>
               <Text style={styles.bitrixStatLabel}>В работе</Text>
-            </View>
-            <View style={styles.bitrixStatBox}>
+            </Pressable>
+            <Pressable style={taskStatBoxStyle("overdue")} onPress={() => applyTaskFilter("overdue")}>
               <Text style={[styles.bitrixStatNum, { color: "#b91c1c" }]}>
                 {bitrixTaskStats.overdue}
               </Text>
               <Text style={styles.bitrixStatLabel}>Просрочено</Text>
-            </View>
+            </Pressable>
+          </View>
+        ) : null}
+        {bitrixTaskFilter !== "all" ? (
+          <View style={styles.filterBanner}>
+            <Text style={styles.filterBannerText}>
+              Фильтр: {bitrixTaskFilterLabel(bitrixTaskFilter)} · {filteredBitrixTasks.length} из{" "}
+              {bitrixTasks.length}
+            </Text>
+            <Pressable onPress={() => setBitrixTaskFilter("all")} hitSlop={8}>
+              <Text style={styles.linkInline}>Сбросить</Text>
+            </Pressable>
           </View>
         ) : null}
         {loading ? <ActivityIndicator color={HEADER_BLUE} /> : null}
-        {!loading && bitrixTasks.length === 0 ? (
+        {!loading && filteredBitrixTasks.length === 0 ? (
           <Text style={styles.muted}>
             {bitrixTasksError ??
-              (bitrixAuth.connected
-                ? "Нет задач, где вы ответственный или соисполнитель."
-                : "Войдите в Bitrix24, чтобы видеть свои задачи.")}
+              (bitrixTaskFilter !== "all"
+                ? `Нет задач в категории «${bitrixTaskFilterLabel(bitrixTaskFilter)}».`
+                : bitrixAuth.connected
+                  ? "Нет задач, где вы ответственный или соисполнитель."
+                  : "Войдите в Bitrix24, чтобы видеть свои задачи.")}
           </Text>
         ) : null}
-        {bitrixTasks.map((task) => (
+        {filteredBitrixTasks.map((task) => (
           <Pressable
             key={task.id}
             style={styles.listItem}
@@ -1152,26 +1215,37 @@ export function HomeScreen() {
           </Pressable>
         ))}
       </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Заявки на документы (TSK)</Text>
-        {jobs.length === 0 ? (
-          <Text style={styles.muted}>Пока нет заявок с этого телефона.</Text>
-        ) : null}
-        {jobs.map((job) => (
-          <View key={job.id} style={styles.listItem}>
-            <View style={styles.listHeader}>
-              <Text style={styles.listTitle}>{job.sourceName}</Text>
-              <Text style={[styles.badge, { color: statusColor(job.status) }]}>{job.status}</Text>
-            </View>
-            <Text style={styles.muted}>
-              {job.templateName} · {job.dispatchStatus}
-            </Text>
-            <Text style={styles.muted}>{formatDate(job.createdAt)}</Text>
-          </View>
-        ))}
-      </View>
     </>
+  );
+
+  const renderBitrixNotificationsCard = () => (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>Уведомления Bitrix24</Text>
+      <Text style={styles.muted}>
+        Системные и персональные уведомления из Bitrix24
+        {bitrixNotificationsAuthMode ? ` · ${bitrixNotificationsAuthMode}` : ""}
+        {bitrixNotifications.length > 0 ? ` · ${bitrixNotifications.length} шт.` : ""}
+      </Text>
+      {bitrixNotificationsError ? <Text style={styles.errorText}>{bitrixNotificationsError}</Text> : null}
+      {bitrixNotificationsLoading ? <ActivityIndicator color={HEADER_BLUE} /> : null}
+      {!bitrixNotificationsLoading && !bitrixNotificationsError && bitrixNotifications.length === 0 ? (
+        <Text style={styles.muted}>
+          {bitrixAuth.connected
+            ? "Уведомлений нет или нет прав im/notifications."
+            : "Войдите в Bitrix24, чтобы видеть уведомления."}
+        </Text>
+      ) : null}
+      {bitrixNotifications.slice(0, 20).map((item) => (
+        <View key={item.id} style={styles.listItem}>
+          <View style={styles.listHeader}>
+            <Text style={styles.listTitle}>{item.title || item.module || "Уведомление"}</Text>
+            {!item.read ? <Text style={styles.badge}>новое</Text> : null}
+          </View>
+          <Text style={styles.muted}>{item.text || "—"}</Text>
+          <Text style={styles.muted}>{formatBitrixDate(item.date)}</Text>
+        </View>
+      ))}
+    </View>
   );
 
   const renderDealsTab = () => (
@@ -1221,21 +1295,41 @@ export function HomeScreen() {
   );
 
   const renderDocsTab = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Файлы</Text>
-      {sourceDocuments.length === 0 ? (
-        <Text style={styles.muted}>Нет загруженных голосовых файлов.</Text>
-      ) : null}
-      {sourceDocuments.map((document) => (
-        <View key={document.id} style={styles.listItem}>
-          <Text style={styles.listTitle}>{document.fileName}</Text>
-          <Text style={styles.muted}>
-            {document.kind} · {Math.round(document.sizeBytes / 1024)} KB
-          </Text>
-          <Text style={styles.muted}>{formatDate(document.createdAt)}</Text>
-        </View>
-      ))}
-    </View>
+    <>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Заявки на документы (TSK)</Text>
+        {jobs.length === 0 ? (
+          <Text style={styles.muted}>Пока нет заявок с этого телефона.</Text>
+        ) : null}
+        {jobs.map((job) => (
+          <View key={job.id} style={styles.listItem}>
+            <View style={styles.listHeader}>
+              <Text style={styles.listTitle}>{job.sourceName}</Text>
+              <Text style={[styles.badge, { color: statusColor(job.status) }]}>{job.status}</Text>
+            </View>
+            <Text style={styles.muted}>
+              {job.templateName} · {job.dispatchStatus}
+            </Text>
+            <Text style={styles.muted}>{formatDate(job.createdAt)}</Text>
+          </View>
+        ))}
+      </View>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Файлы</Text>
+        {sourceDocuments.length === 0 ? (
+          <Text style={styles.muted}>Нет загруженных голосовых файлов.</Text>
+        ) : null}
+        {sourceDocuments.map((document) => (
+          <View key={document.id} style={styles.listItem}>
+            <Text style={styles.listTitle}>{document.fileName}</Text>
+            <Text style={styles.muted}>
+              {document.kind} · {Math.round(document.sizeBytes / 1024)} KB
+            </Text>
+            <Text style={styles.muted}>{formatDate(document.createdAt)}</Text>
+          </View>
+        ))}
+      </View>
+    </>
   );
 
   const renderMoreTab = () => {
@@ -1250,7 +1344,9 @@ export function HomeScreen() {
       { id: "errors", label: "Ошибки" }
     ];
     return (
-      <View style={styles.card}>
+      <>
+        {renderBitrixNotificationsCard()}
+        <View style={styles.card}>
         <Text style={styles.cardTitle}>Ещё</Text>
         <Text style={styles.muted}>
           Журнал хранится на телефоне (до 80 записей). Те же действия Bitrix дублируются в админке в
@@ -1333,7 +1429,8 @@ export function HomeScreen() {
             ) : null}
           </>
         )}
-      </View>
+        </View>
+      </>
     );
   };
 
@@ -1549,8 +1646,23 @@ export function HomeScreen() {
     <View style={styles.root}>
       <ExpoStatusBar style="light" />
       <View style={[styles.header, { paddingTop: topInset + 10 }]}>
-        <Text style={styles.headerTitle}>Главная</Text>
-        <Pressable onPress={() => void refresh()} hitSlop={12}>
+        <Text style={styles.headerTitle}>
+          {activeTab === "home"
+            ? "Главная"
+            : activeTab === "tasks"
+              ? "Задачи"
+              : activeTab === "deals"
+                ? "Сделки"
+                : activeTab === "docs"
+                  ? "Документы"
+                  : "Ещё"}
+        </Text>
+        <Pressable
+          onPress={() => {
+            setActiveTab("more");
+          }}
+          hitSlop={12}
+        >
           <Ionicons name="notifications-outline" size={24} color="#fff" />
         </Pressable>
       </View>
@@ -1774,9 +1886,31 @@ const styles = StyleSheet.create({
   bitrixStatBox: {
     alignItems: "center",
     backgroundColor: "#f8fafc",
+    borderColor: "transparent",
     borderRadius: 12,
+    borderWidth: 2,
     flex: 1,
     paddingVertical: 12
+  },
+  bitrixStatBoxActive: {
+    backgroundColor: "#eff6ff",
+    borderColor: HEADER_BLUE
+  },
+  filterBanner: {
+    alignItems: "center",
+    backgroundColor: "#eff6ff",
+    borderRadius: 10,
+    flexDirection: "row",
+    gap: 10,
+    justifyContent: "space-between",
+    paddingHorizontal: 12,
+    paddingVertical: 10
+  },
+  filterBannerText: {
+    color: "#1e3a8a",
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "600"
   },
   bitrixStatNum: {
     color: "#0f172a",

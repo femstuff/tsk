@@ -11,6 +11,7 @@ import type {
   BitrixDealDetail,
   BitrixDealsBundle,
   BitrixDealSummary,
+  BitrixNotificationsBundle,
   BitrixTaskDetail,
   BitrixTasksBundle,
   BitrixTaskSummary,
@@ -264,6 +265,33 @@ export async function updateBitrixDealStage(dealId: string, stageId: string) {
     }
   );
   return response.item;
+}
+
+export async function updateBitrixDealFields(dealId: string, fields: Record<string, string>) {
+  const response = await request<{ item: BitrixDealDetail }>(
+    `/api/v1/mobile/bitrix-deals/${encodeURIComponent(dealId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fields })
+    }
+  );
+  return response.item;
+}
+
+export async function listBitrixNotifications(limit = 100) {
+  const bundle = await request<BitrixNotificationsBundle & { docs?: unknown }>(
+    `/api/v1/mobile/bitrix-notifications?limit=${encodeURIComponent(String(limit))}`
+  );
+  if (!Array.isArray(bundle.items)) {
+    if (bundle && typeof bundle === "object" && "docs" in bundle) {
+      throw new Error(
+        "Сервер не поддерживает уведомления Bitrix. Пересоберите backend: docker compose build backend-api && docker compose up -d backend-api"
+      );
+    }
+    throw new Error("Неверный ответ сервера при загрузке уведомлений Bitrix24");
+  }
+  return bundle;
 }
 
 export async function startBitrixOAuth() {

@@ -345,7 +345,7 @@ func (s *Service) ListBitrixTasksForMobile(ctx context.Context, limit int, respo
 			rid = responsibleOverride
 		}
 
-		cacheKey := cache.BitrixTasksKey(rid, limit) + ":oauth:v3:" + oauthSessionID
+		cacheKey := cache.BitrixTasksKey(rid, limit) + ":oauth:v4:" + oauthSessionID
 		if !skipCache && s.cache != nil {
 			if payload, ok, err := s.cache.Get(ctx, cacheKey); err == nil && ok {
 				if json.Unmarshal(payload, &out) == nil {
@@ -386,7 +386,7 @@ func (s *Service) ListBitrixTasksForMobile(ctx context.Context, limit int, respo
 		}
 	}
 
-	cacheKey := cache.BitrixTasksKey(rid, limit)
+	cacheKey := cache.BitrixTasksKey(rid, limit) + ":webhook:v2"
 	if !skipCache && s.cache != nil {
 		if payload, ok, err := s.cache.Get(ctx, cacheKey); err == nil && ok {
 			if json.Unmarshal(payload, &out) == nil {
@@ -419,9 +419,9 @@ func (s *Service) invalidateBitrixTaskListCache(ctx context.Context, rid, limit 
 	}
 	oauthSessionID = strings.TrimSpace(oauthSessionID)
 	if oauthSessionID != "" {
-		_ = s.cache.Delete(ctx, cache.BitrixTasksKey(rid, limit)+":oauth:v3:"+oauthSessionID)
+		_ = s.cache.Delete(ctx, cache.BitrixTasksKey(rid, limit)+":oauth:v4:"+oauthSessionID)
 	}
-	_ = s.cache.Delete(ctx, cache.BitrixTasksKey(rid, limit))
+	_ = s.cache.Delete(ctx, cache.BitrixTasksKey(rid, limit)+":webhook:v2")
 }
 
 // GetBitrixTaskForMobile — карточка задачи (описание и поля).

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -61,12 +60,23 @@ func (t *TokenREST) ListTasksForUser(ctx context.Context, userID int, limit int)
 	}
 
 	byID := make(map[string]BitrixTaskBrief)
-	appendUnique := func(items []BitrixTaskBrief) {
+	priority := make(map[string]int)
+	appendUnique := func(items []BitrixTaskBrief, rolePriority int) {
 		for _, item := range items {
 			if item.ID == "" {
 				continue
 			}
+			if existing, ok := byID[item.ID]; ok {
+				if rolePriority < priority[item.ID] {
+					byID[item.ID] = item
+					priority[item.ID] = rolePriority
+				} else if rolePriority == priority[item.ID] && bitrixTaskRecencyKey(item) > bitrixTaskRecencyKey(existing) {
+					byID[item.ID] = item
+				}
+				continue
+			}
 			byID[item.ID] = item
+			priority[item.ID] = rolePriority
 		}
 	}
 
@@ -74,25 +84,23 @@ func (t *TokenREST) ListTasksForUser(ctx context.Context, userID int, limit int)
 	if err != nil {
 		return nil, err
 	}
-	appendUnique(responsible)
+	appendUnique(responsible, 0)
 
 	accomplice, err := t.listTasksWithFilter(ctx, "ACCOMPLICE", userID, limit)
 	if err == nil {
-		appendUnique(accomplice)
+		appendUnique(accomplice, 1)
 	}
 
 	created, err := t.listTasksWithFilter(ctx, "CREATED_BY", userID, limit)
 	if err == nil {
-		appendUnique(created)
+		appendUnique(created, 2)
 	}
 
 	out := make([]BitrixTaskBrief, 0, len(byID))
 	for _, item := range byID {
 		out = append(out, item)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].ID > out[j].ID
-	})
+	sortBitrixTasksByRecency(out)
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -107,7 +115,10 @@ func (t *TokenREST) listTasksWithFilter(ctx context.Context, filterField string,
 	form.Add("select[]", "STATUS")
 	form.Add("select[]", "DEADLINE")
 	form.Add("select[]", "CLOSED_DATE")
-	form.Set("order[ID]", "desc")
+	form.Add("select[]", "CREATED_DATE")
+	form.Add("select[]", "CHANGED_DATE")
+	form.Add("select[]", "RESPONSIBLE_ID")
+	form.Set("order[CHANGED_DATE]", "desc")
 	form.Set("start", "0")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.methodURL("tasks.task.list"), strings.NewReader(form.Encode()))
@@ -146,6 +157,7 @@ func (t *TokenREST) listTasksWithFilter(ctx context.Context, filterField string,
 	if err != nil {
 		return nil, err
 	}
+	sortBitrixTasksByRecency(tasks)
 	if len(tasks) > limit {
 		tasks = tasks[:limit]
 	}
