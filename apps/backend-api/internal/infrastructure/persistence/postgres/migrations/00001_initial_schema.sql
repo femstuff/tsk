@@ -1,3 +1,4 @@
+-- +goose Up
 CREATE TABLE IF NOT EXISTS document_templates (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -51,7 +52,7 @@ CREATE INDEX IF NOT EXISTS idx_generated_documents_job_id
 CREATE TABLE IF NOT EXISTS source_documents (
     id TEXT PRIMARY KEY,
     job_id TEXT REFERENCES document_jobs(id),
-    template_id TEXT NOT NULL REFERENCES document_templates(id),
+    template_id TEXT REFERENCES document_templates(id),
     kind TEXT NOT NULL,
     origin TEXT NOT NULL,
     file_name TEXT NOT NULL,
@@ -96,3 +97,11 @@ CREATE TABLE IF NOT EXISTS task_commands (
 
 CREATE INDEX IF NOT EXISTS idx_task_commands_job_id
     ON task_commands (job_id, created_at DESC);
+
+-- +goose Down
+DROP TABLE IF EXISTS task_commands;
+DROP TABLE IF EXISTS processing_events;
+DROP TABLE IF EXISTS source_documents;
+DROP TABLE IF EXISTS generated_documents;
+DROP TABLE IF EXISTS document_jobs;
+DROP TABLE IF EXISTS document_templates;

@@ -75,7 +75,7 @@ export function useDashboardData() {
         listGeneratedDocuments(undefined, dashboardPollRequestInit),
         listSourceDocuments(undefined, dashboardPollRequestInit),
         listTaskCommands(undefined, dashboardPollRequestInit),
-        listProcessingEvents(120, dashboardPollRequestInit)
+        listProcessingEvents(50, dashboardPollRequestInit)
       ]);
 
       setState({

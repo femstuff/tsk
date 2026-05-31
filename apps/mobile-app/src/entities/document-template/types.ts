@@ -73,6 +73,12 @@ export type MobileVoiceRequestResult = {
   taskCommand?: TaskCommandSummary;
 };
 
+export type BitrixTaskPerson = {
+  id?: string;
+  name?: string;
+  workPosition?: string;
+};
+
 /** Задача из Bitrix24 (контекст вебхука на сервере). */
 export type BitrixTaskSummary = {
   id: string;
@@ -80,6 +86,31 @@ export type BitrixTaskSummary = {
   status: string;
   deadline?: string;
   closedDate?: string;
+};
+
+export type BitrixTaskDetail = BitrixTaskSummary & {
+  description?: string;
+  priority?: string;
+  mark?: string;
+  creator?: BitrixTaskPerson;
+  responsible?: BitrixTaskPerson;
+  accomplices?: BitrixTaskPerson[];
+  auditors?: BitrixTaskPerson[];
+  createdDate?: string;
+  changedDate?: string;
+  dateStart?: string;
+  startDatePlan?: string;
+  endDatePlan?: string;
+  groupId?: string;
+  stageId?: string;
+  parentId?: string;
+  commentsCount?: string;
+  timeEstimate?: string;
+  durationFact?: string;
+  tags?: string[];
+  crmLinks?: string[];
+  favorite?: boolean;
+  availableActions?: Record<string, boolean>;
 };
 
 export type BitrixTaskStats = {
@@ -92,6 +123,56 @@ export type BitrixTasksBundle = {
   responsibleUserId: number;
   stats: BitrixTaskStats;
   items: BitrixTaskSummary[];
+  authMode?: string;
+};
+
+export type BitrixDealSummary = {
+  id: string;
+  title: string;
+  stageId: string;
+  stageLabel: string;
+  categoryId: string;
+  opportunity?: string;
+  currencyId?: string;
+  assignedById?: string;
+  dateCreate?: string;
+  dateModify?: string;
+  closed?: string;
+};
+
+export type BitrixDealStageOption = {
+  id: string;
+  label: string;
+};
+
+export type BitrixDealDetail = BitrixDealSummary & {
+  assignedBy?: BitrixTaskPerson;
+  companyId?: string;
+  contactId?: string;
+  comments?: string;
+  stageOptions?: BitrixDealStageOption[];
+};
+
+export type BitrixDealsBundle = {
+  items: BitrixDealSummary[];
+  authMode?: string;
+};
+
+export type BitrixOAuthStartResult = {
+  authorizeUrl: string;
+  sessionId: string;
+  state: string;
+};
+
+export type BitrixOAuthSessionView = {
+  sessionId: string;
+  connected: boolean;
+  bitrixUserId: number;
+  userName: string;
+  portalDomain: string;
+  oauthScopes?: string;
+  taskScopeGranted?: boolean;
+  authMode: string;
 };
 
 /** Ответ после разбора запроса и вызова Bitrix. */

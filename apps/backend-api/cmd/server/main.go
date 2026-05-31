@@ -11,12 +11,15 @@ import (
 	"time"
 
 	app "tsk/backend-api/internal/application/documentjob"
+	"tsk/backend-api/internal/infrastructure/cache"
 	"tsk/backend-api/internal/infrastructure/config"
 	"tsk/backend-api/internal/infrastructure/metrics"
 	"tsk/backend-api/internal/infrastructure/persistence/postgres"
+	prom "tsk/backend-api/internal/infrastructure/prometheus"
 	"tsk/backend-api/internal/infrastructure/storage/localfs"
 	"tsk/backend-api/internal/infrastructure/whisper"
 	"tsk/backend-api/internal/integrations/bitrixclient"
+	"tsk/backend-api/internal/integrations/bitrixoauth"
 	httpapi "tsk/backend-api/internal/interfaces/http"
 )
 
@@ -34,10 +37,21 @@ func main() {
 	}
 	defer store.Close()
 
-	if err := postgres.ApplySchema(ctx, store.Pool()); err != nil {
-		logger.Error("failed to apply postgres schema", "error", err)
+	if err := postgres.RunMigrations(ctx, store.Pool()); err != nil {
+		logger.Error("failed to apply postgres migrations", "error", err)
 		os.Exit(1)
 	}
+
+	cacheStore, closeCache, err := cache.NewFromConfig(cfg.RedisURL)
+	if err != nil {
+		logger.Error("failed to connect to redis", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if closeErr := closeCache(); closeErr != nil {
+			logger.Error("failed to close redis", "error", closeErr)
+		}
+	}()
 
 	storage := localfs.New(cfg.StorageRoot)
 
@@ -48,6 +62,18 @@ func main() {
 	bitrixHTTP := &http.Client{Timeout: 90 * time.Second}
 	bitrixClient := bitrixclient.New(cfg.BitrixWebhookURL, bitrixHTTP)
 
+	portalDomain := strings.TrimSpace(cfg.BitrixPortalDomain)
+	if portalDomain == "" {
+		portalDomain = bitrixoauth.PortalDomainFromWebhook(cfg.BitrixWebhookURL)
+	}
+	oauthCfg := bitrixoauth.Config{
+		ClientID:     cfg.BitrixOAuthClientID,
+		ClientSecret: cfg.BitrixOAuthClientSecret,
+		PortalDomain: portalDomain,
+		RedirectURI:  cfg.BitrixOAuthRedirectURI,
+		MobileScheme: cfg.BitrixMobileAppScheme,
+	}
+
 	service := app.NewService(
 		store,
 		store,
@@ -55,22 +81,45 @@ func main() {
 		store,
 		store,
 		store,
+		store,
 		storage,
+		cacheStore,
+		cfg.StorageRoot,
 		collector,
 		app.IntegrationsConfig{
 			BitrixWebhookURL: cfg.BitrixWebhookURL,
 			ApprovalEmail:    cfg.ApprovalEmail,
+			BitrixOAuth:      oauthCfg,
 		},
 		whisperClient,
 		bitrixClient,
+		store,
 	)
 	if err := service.EnsureSeedData(ctx); err != nil {
 		logger.Error("failed to ensure seed data", "error", err)
 		os.Exit(1)
 	}
+	if err := service.EnsureRuntimeSettings(ctx); err != nil {
+		logger.Error("failed to ensure runtime settings", "error", err)
+		os.Exit(1)
+	}
+
+	recovered, err := service.RecoverStuckJobs(ctx, cfg.JobRecoveryInterval)
+	if err != nil {
+		logger.Error("failed to recover stuck jobs", "error", err)
+		os.Exit(1)
+	}
+	if recovered > 0 {
+		logger.Warn("recovered stuck document jobs", "count", recovered)
+	}
 
 	processor := app.NewProcessor(service, logger, cfg.ProcessingInterval)
-	handler := httpapi.NewHandler(service, cfg, collector)
+	prometheusClient := prom.NewClient(cfg.PrometheusURL, &http.Client{Timeout: 2 * time.Second})
+	handler := httpapi.NewHandler(service, cfg, collector, prometheusClient, httpapi.HealthDeps{
+		Platform:    store,
+		Cache:       cacheStore,
+		StorageRoot: cfg.StorageRoot,
+	})
 	router := httpapi.NewRouter(handler, collector)
 
 	server := &http.Server{
@@ -85,6 +134,7 @@ func main() {
 		"service", cfg.ServiceName,
 		"environment", cfg.Environment,
 		"addr", cfg.Address(),
+		"redis", strings.TrimSpace(cfg.RedisURL) != "",
 	)
 
 	go processor.Run(ctx)

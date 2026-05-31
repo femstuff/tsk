@@ -71,11 +71,11 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(tsk_business_http_requests_total) or vector(0)",
+          "expr": "sum(rate(tsk_business_http_requests_total{job=\"backend-api\"}[5m]))",
           "refId": "A"
         }
       ],
-      "title": "Product API Requests Total",
+      "title": "Product RPS (live)",
       "type": "stat"
     },
     {
@@ -128,7 +128,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(tsk_document_jobs_created_total) or vector(0)",
+          "expr": "max(tsk_document_jobs_created_total{job=\"backend-api\"})",
           "refId": "A"
         }
       ],
@@ -189,7 +189,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(tsk_document_jobs_by_status{status=\"failed\"}) or vector(0)",
+          "expr": "max(tsk_document_jobs_by_status{job=\"backend-api\",status=\"failed\"})",
           "refId": "A"
         }
       ],
@@ -250,11 +250,11 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(tsk_errors_total) or vector(0)",
+          "expr": "sum(rate(tsk_errors_total{job=\"backend-api\"}[5m]))",
           "refId": "A"
         }
       ],
-      "title": "Errors Total",
+      "title": "Errors / sec",
       "type": "stat"
     },
     {
@@ -328,7 +328,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(tsk_business_http_requests_total[1m])) or vector(0)",
+          "expr": "sum(rate(tsk_business_http_requests_total{job=\"backend-api\"}[5m])) or vector(0)",
           "legendFormat": "product requests/sec",
           "refId": "A"
         },
@@ -337,7 +337,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(tsk_http_requests_total[1m])) - sum(rate(tsk_business_http_requests_total[1m]))) or vector(0)",
+          "expr": "(sum(rate(tsk_http_requests_total{job=\"backend-api\"}[5m])) - sum(rate(tsk_business_http_requests_total{job=\"backend-api\"}[5m]))) or vector(0)",
           "legendFormat": "background requests/sec",
           "refId": "B"
         },
@@ -346,7 +346,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(tsk_errors_total[5m])) or vector(0)",
+          "expr": "sum(rate(tsk_errors_total{job=\"backend-api\"}[5m])) or vector(0)",
           "legendFormat": "errors/sec",
           "refId": "C"
         }
@@ -402,7 +402,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (status) (tsk_document_jobs_by_status)",
+          "expr": "max by (status) (tsk_document_jobs_by_status{job=\"backend-api\"})",
           "legendFormat": "{{status}}",
           "refId": "A"
         }
@@ -473,16 +473,16 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, status) (rate(tsk_document_job_processing_duration_seconds_bucket[5m])))",
-          "legendFormat": "p95 {{status}}",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(tsk_http_request_duration_seconds_bucket{job=\"backend-api\"}[5m])))",
+          "legendFormat": "p95 HTTP",
           "refId": "A"
         }
       ],
-      "title": "Job Processing Duration p95",
+      "title": "HTTP Latency p95",
       "type": "timeseries"
     }
   ],
-  "refresh": "10s",
+  "refresh": "5s",
   "schemaVersion": 39,
   "style": "dark",
   "tags": [
@@ -494,7 +494,7 @@
     "list": []
   },
   "time": {
-    "from": "now-30m",
+    "from": "now-1h",
     "to": "now"
   },
   "timepicker": {},

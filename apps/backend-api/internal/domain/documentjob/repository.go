@@ -129,6 +129,7 @@ type GeneratedDocumentRepository interface {
 type ProcessingEventRepository interface {
 	ListProcessingEvents(context.Context, string, int) ([]ProcessingEvent, error)
 	CreateProcessingEvent(context.Context, ProcessingEventCreateParams) (ProcessingEvent, error)
+	CountVoiceEventsSince(context.Context, time.Time) (int, error)
 }
 
 type SourceDocumentRepository interface {

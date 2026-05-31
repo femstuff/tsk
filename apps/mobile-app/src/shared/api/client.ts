@@ -6,6 +6,12 @@
 import { Platform } from "react-native";
 
 import type {
+  BitrixOAuthSessionView,
+  BitrixOAuthStartResult,
+  BitrixDealDetail,
+  BitrixDealsBundle,
+  BitrixDealSummary,
+  BitrixTaskDetail,
   BitrixTasksBundle,
   BitrixTaskSummary,
   DocumentJobSummary,
@@ -18,6 +24,7 @@ import type {
 } from "../../entities/document-template/types";
 
 import { appendRequestLogFailure, appendRequestLogSuccess } from "./requestLog";
+import { getBitrixSessionId } from "../../features/bitrix/sessionStorage";
 
 const MOBILE_API_BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL ??
@@ -60,24 +67,48 @@ function logApiOutcome(
   console.log(`[API] ${method} ${path} ${outcome} ${durationMs}ms ${detail}`);
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const VOICE_REQUEST_TIMEOUT_MS = 180_000;
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  bitrixSessionId?: string | null
+): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const started = Date.now();
   const headers = new Headers(init?.headers ?? undefined);
   if (!headers.has("X-TSK-Request-Source")) {
     headers.set("X-TSK-Request-Source", "mobile-app");
   }
-  const mergedInit: RequestInit = { ...init, headers };
+  const sessionId =
+    bitrixSessionId === undefined ? await getBitrixSessionId() : bitrixSessionId;
+  if (sessionId) {
+    headers.set("X-TSK-Bitrix-Session", sessionId);
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const mergedInit: RequestInit = { ...init, headers, signal: controller.signal };
+
   let response: Response;
   try {
     response = await fetch(`${MOBILE_API_BASE_URL}${path}`, mergedInit);
   } catch (err) {
+    clearTimeout(timeoutId);
     const durationMs = Date.now() - started;
-    const message = err instanceof Error ? err.message : String(err);
+    const message =
+      err instanceof Error && err.name === "AbortError"
+        ? `Превышено время ожидания (${Math.round(timeoutMs / 1000)} сек). Whisper может долго обрабатывать первую запись — попробуйте ещё раз.`
+        : err instanceof Error
+          ? err.message
+          : String(err);
     logApiOutcome(method, path, false, durationMs, `error=${message}`);
     void appendRequestLogFailure(path, method, durationMs, message);
-    throw err;
+    throw new Error(message);
   }
+  clearTimeout(timeoutId);
 
   const durationMs = Date.now() - started;
 
@@ -93,6 +124,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     logApiOutcome(method, path, false, durationMs, `status=${response.status} ${thrown.message}`);
     void appendRequestLogFailure(path, method, durationMs, thrown.message);
     throw thrown;
+  }
+
+  if (response.status === 204 || response.headers.get("content-length") === "0") {
+    logApiOutcome(method, path, true, durationMs, `status=${response.status}`);
+    return undefined as T;
   }
 
   const json = (await response.json()) as T;
@@ -159,12 +195,101 @@ export async function createTaskCommand(input: {
   return response.item;
 }
 
-export async function listBitrixTasks(limit = 60, responsibleId?: number) {
+export async function listBitrixTasks(limit = 60, responsibleId?: number, refresh = false) {
   let qs = `limit=${encodeURIComponent(String(limit))}`;
   if (responsibleId != null && responsibleId > 0) {
     qs += `&responsibleId=${encodeURIComponent(String(responsibleId))}`;
   }
+  if (refresh) {
+    qs += "&refresh=1";
+  }
   return request<BitrixTasksBundle>(`/api/v1/mobile/bitrix-tasks?${qs}`);
+}
+
+export async function getBitrixTask(taskId: string) {
+  const response = await request<{ item: BitrixTaskDetail }>(
+    `/api/v1/mobile/bitrix-tasks/${encodeURIComponent(taskId)}`
+  );
+  return response.item;
+}
+
+export async function updateBitrixTaskStatus(taskId: string, status: number) {
+  const response = await request<{ item: BitrixTaskDetail }>(
+    `/api/v1/mobile/bitrix-tasks/${encodeURIComponent(taskId)}/status`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status })
+    }
+  );
+  return response.item;
+}
+
+export async function listBitrixDeals(limit = 50, search = "", refresh = false) {
+  let qs = `limit=${encodeURIComponent(String(limit))}`;
+  if (search.trim()) {
+    qs += `&search=${encodeURIComponent(search.trim())}`;
+  }
+  if (refresh) {
+    qs += "&refresh=1";
+  }
+  const bundle = await request<BitrixDealsBundle & { docs?: unknown }>(
+    `/api/v1/mobile/bitrix-deals?${qs}`
+  );
+  if (!Array.isArray(bundle.items)) {
+    if (bundle && typeof bundle === "object" && "docs" in bundle) {
+      throw new Error(
+        "Сервер не поддерживает список сделок. Пересоберите backend: docker compose build backend-api && docker compose up -d backend-api"
+      );
+    }
+    throw new Error("Неверный ответ сервера при загрузке сделок Bitrix24");
+  }
+  return bundle;
+}
+
+export async function getBitrixDeal(dealId: string) {
+  const response = await request<{ item: BitrixDealDetail }>(
+    `/api/v1/mobile/bitrix-deals/${encodeURIComponent(dealId)}`
+  );
+  return response.item;
+}
+
+export async function updateBitrixDealStage(dealId: string, stageId: string) {
+  const response = await request<{ item: BitrixDealDetail }>(
+    `/api/v1/mobile/bitrix-deals/${encodeURIComponent(dealId)}/stage`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stageId })
+    }
+  );
+  return response.item;
+}
+
+export async function startBitrixOAuth() {
+  const response = await request<{ item: BitrixOAuthStartResult }>(
+    "/api/v1/mobile/bitrix/oauth/start"
+  );
+  return response.item;
+}
+
+export async function fetchBitrixOAuthSession(sessionId: string) {
+  const response = await request<{ item: BitrixOAuthSessionView }>(
+    `/api/v1/mobile/bitrix/oauth/session?sessionId=${encodeURIComponent(sessionId)}`,
+    undefined,
+    DEFAULT_REQUEST_TIMEOUT_MS,
+    sessionId
+  );
+  return response.item;
+}
+
+export async function disconnectBitrixOAuth(sessionId: string) {
+  await request<void>(
+    "/api/v1/mobile/bitrix/oauth/session",
+    { method: "DELETE" },
+    DEFAULT_REQUEST_TIMEOUT_MS,
+    sessionId
+  );
 }
 
 export async function createMobileBitrixIntentText(input: {
@@ -174,19 +299,23 @@ export async function createMobileBitrixIntentText(input: {
   dealHint?: string;
   stageHint?: string;
 }) {
-  const response = await request<{ item: MobileBitrixIntentResult }>("/api/v1/mobile/bitrix-intent", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
+  const response = await request<{ item: MobileBitrixIntentResult }>(
+    "/api/v1/mobile/bitrix-intent",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        text: input.text,
+        dealId: input.dealId ?? 0,
+        dealTitle: input.dealTitle ?? "",
+        dealHint: input.dealHint ?? "",
+        stageHint: input.stageHint ?? ""
+      })
     },
-    body: JSON.stringify({
-      text: input.text,
-      dealId: input.dealId ?? 0,
-      dealTitle: input.dealTitle ?? "",
-      dealHint: input.dealHint ?? "",
-      stageHint: input.stageHint ?? ""
-    })
-  });
+    VOICE_REQUEST_TIMEOUT_MS
+  );
   return response.item;
 }
 
@@ -224,10 +353,14 @@ export async function createMobileBitrixIntentMultipart(input: {
     formData.append("stageHint", input.stageHint.trim());
   }
 
-  const response = await request<{ item: MobileBitrixIntentResult }>("/api/v1/mobile/bitrix-intent", {
-    method: "POST",
-    body: formData
-  });
+  const response = await request<{ item: MobileBitrixIntentResult }>(
+    "/api/v1/mobile/bitrix-intent",
+    {
+      method: "POST",
+      body: formData
+    },
+    VOICE_REQUEST_TIMEOUT_MS
+  );
   return response.item;
 }
 
@@ -264,7 +397,8 @@ export async function createMobileVoiceRequest(input: {
     {
       method: "POST",
       body: formData
-    }
+    },
+    VOICE_REQUEST_TIMEOUT_MS
   );
 
   return response.item;

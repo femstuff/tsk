@@ -1,6 +1,6 @@
 ﻿.PHONY: help build up down restart logs clean up-mobile logs-mobile up-legacy logs-legacy
 
-DEFAULT_SERVICES := postgres backend-api admin-web prometheus grafana
+DEFAULT_SERVICES := postgres redis backend-api admin-web prometheus grafana
 
 help:
 	@echo "Команды для управления:"

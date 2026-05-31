@@ -10,8 +10,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"tsk/backend-api/internal/application/voiceintent"
 	domain "tsk/backend-api/internal/domain/documentjob"
+	platform "tsk/backend-api/internal/domain/platform"
+	"tsk/backend-api/internal/application/voiceintent"
 	"tsk/backend-api/internal/integrations/bitrixclient"
 )
 
@@ -172,9 +173,13 @@ func (s *Service) RunAdminVoiceBitrixPipeline(ctx context.Context, in AdminVoice
 		return AdminVoiceBitrixResult{}, err
 	}
 
+	s.registerStoredFile(ctx, "source", storedFile, platform.EntityTypeSourceDocument, src.ID, in.Audio)
+
 	if _, err := s.createEvent(ctx, &job.ID, "info", "voice.transcribed", "Транскрипция голоса завершена", truncateForEvent(transcript, 2000)); err != nil {
 		return AdminVoiceBitrixResult{}, err
 	}
+
+	s.saveTranscription(ctx, platform.TranscriptionSourceAdminVoice, transcript, &job.ID, &src.ID)
 
 	intent := voiceintent.Parse(transcript, in.DealIDOverride)
 	if strings.TrimSpace(in.DealTitleOverride) != "" && strings.TrimSpace(intent.DealTitle) == "" {

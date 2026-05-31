@@ -1,3 +1,4 @@
+import type { AdminDashboard } from "../../entities/admin/types";
 import type {
   AdminVoiceBitrixResult,
   DocumentJob,
@@ -8,6 +9,7 @@ import type {
   SourceDocument,
   TaskCommand
 } from "../../entities/document-job/types";
+import type { ObservabilityDashboard } from "../../entities/observability/types";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
@@ -184,5 +186,18 @@ export async function updateDocumentJobStatus(
     }
   );
 
+  return response.item;
+}
+
+export async function getObservabilityDashboard(init?: RequestInit) {
+  const response = await request<ItemResponse<ObservabilityDashboard>>(
+    "/api/v1/admin/observability/dashboard",
+    init
+  );
+  return response.item;
+}
+
+export async function getAdminDashboard(init?: RequestInit) {
+  const response = await request<ItemResponse<AdminDashboard>>("/api/v1/admin/dashboard", init);
   return response.item;
 }

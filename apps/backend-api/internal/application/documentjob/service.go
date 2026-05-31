@@ -12,8 +12,13 @@ import (
 
 	"github.com/google/uuid"
 
+	bdomain "tsk/backend-api/internal/domain/bitrixoauth"
 	domain "tsk/backend-api/internal/domain/documentjob"
+	platform "tsk/backend-api/internal/domain/platform"
+	"tsk/backend-api/internal/application/estimateintent"
+	"tsk/backend-api/internal/infrastructure/cache"
 	"tsk/backend-api/internal/infrastructure/whisper"
+	"tsk/backend-api/internal/integrations/bitrixoauth"
 	"tsk/backend-api/internal/integrations/bitrixclient"
 )
 
@@ -39,6 +44,7 @@ type FileStorage interface {
 type IntegrationsConfig struct {
 	BitrixWebhookURL string
 	ApprovalEmail    string
+	BitrixOAuth      bitrixoauth.Config
 }
 
 type CreateTemplateInput struct {
@@ -96,12 +102,18 @@ type Service struct {
 	sourceDocuments domain.SourceDocumentRepository
 	taskCommands    domain.TaskCommandRepository
 	events          domain.ProcessingEventRepository
+	platform        platform.Repository
 	storage         FileStorage
+	cache           cache.Cache
+	storageRoot     string
 	metrics         MetricsRecorder
 	integrations    IntegrationsConfig
 	httpClient      *http.Client
 	whisper         *whisper.Client
 	bitrix          *bitrixclient.Client
+	bitrixOAuth     *bitrixoauth.Client
+	bitrixOAuthCfg  bitrixoauth.Config
+	bitrixOAuthSessions bdomain.Repository
 	now             func() time.Time
 }
 
@@ -112,12 +124,21 @@ func NewService(
 	sourceDocuments domain.SourceDocumentRepository,
 	taskCommands domain.TaskCommandRepository,
 	events domain.ProcessingEventRepository,
+	platformRepo platform.Repository,
 	storage FileStorage,
+	cacheStore cache.Cache,
+	storageRoot string,
 	metrics MetricsRecorder,
 	integrations IntegrationsConfig,
 	whisperClient *whisper.Client,
 	bitrixClient *bitrixclient.Client,
+	bitrixOAuthSessions bdomain.Repository,
 ) *Service {
+	oauthCfg := integrations.BitrixOAuth
+	var oauthClient *bitrixoauth.Client
+	if oauthCfg.Enabled() {
+		oauthClient = bitrixoauth.NewClient(oauthCfg, &http.Client{Timeout: 30 * time.Second})
+	}
 	return &Service{
 		templates:       templates,
 		jobs:            jobs,
@@ -125,15 +146,21 @@ func NewService(
 		sourceDocuments: sourceDocuments,
 		taskCommands:    taskCommands,
 		events:          events,
+		platform:        platformRepo,
 		storage:         storage,
+		cache:           cacheStore,
+		storageRoot:     storageRoot,
 		metrics:         metrics,
 		integrations:    integrations,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		whisper: whisperClient,
-		bitrix:  bitrixClient,
-		now:     time.Now,
+		whisper:             whisperClient,
+		bitrix:              bitrixClient,
+		bitrixOAuth:         oauthClient,
+		bitrixOAuthCfg:      oauthCfg,
+		bitrixOAuthSessions: bitrixOAuthSessions,
+		now:                 time.Now,
 	}
 }
 
@@ -144,48 +171,36 @@ func (s *Service) EnsureSeedData(ctx context.Context) error {
 	}
 
 	if len(templates) == 0 {
-		seeds := []CreateTemplateInput{
-			{
-				Name:        "Служебное резюме",
-				Category:    "operations",
-				Version:     "v1",
-				Description: "Шаблон операционного резюме для входящих запросов на документы.",
-				FileName:    "service-brief-template.txt",
-				MimeType:    "text/plain",
-				Content: []byte(strings.TrimSpace(`
-Служебное резюме
-----------------
-Источник: {{sourceName}}
-Инициатор: {{requestedBy}}
-Параметры:
-{{payload}}
+		seed := CreateTemplateInput{
+			Name:        "Локальный сметный расчёт",
+			Category:    "estimate",
+			Version:     "v1",
+			Description: "Форма № 4 — локальная смета, заполняется из голосовой записи.",
+			FileName:    "local-estimate-form4.txt",
+			MimeType:    "text/plain",
+			Content: []byte(strings.TrimSpace(`
+ЛОКАЛЬНЫЙ СМЕТНЫЙ РАСЧЁТ № {{estimateNumber}}
+Форма № 4
+
+Наименование стройки: {{projectName}}
+Наименование работ и затрат: {{objectDescription}}
+Основание: чертежи № {{basis}}
+Сметная стоимость: {{estimatedCost}} руб.
+Средства на оплату труда: {{laborCosts}} руб.
+Составлен(а) в текущих (прогнозных) ценах по состоянию на {{priceDate}}
+
+{{lineItems}}
+
+Итого прямые затраты: {{totalDirectCosts}} руб.
+ВСЕГО ПО СМЕТЕ: {{grandTotal}} руб.
 `)),
-			},
-			{
-				Name:        "Повторное коммерческое предложение",
-				Category:    "sales",
-				Version:     "v1",
-				Description: "Шаблон последующего предложения для продаж или передачи через Битрикс.",
-				FileName:    "sales-follow-up-template.txt",
-				MimeType:    "text/plain",
-				Content: []byte(strings.TrimSpace(`
-Повторное коммерческое предложение
-----------------------------------
-Источник лида: {{sourceName}}
-Доставка: {{deliveryChannel}} -> {{deliveryAddress}}
-Параметры:
-{{payload}}
-`)),
-			},
 		}
 
-		for _, template := range seeds {
-			if _, err := s.CreateTemplate(ctx, template); err != nil {
-				return err
-			}
+		if _, err := s.CreateTemplate(ctx, seed); err != nil {
+			return err
 		}
 
-		if _, err := s.createEvent(ctx, nil, "info", "system.seeded", "Загружены стартовые шаблоны документов", ""); err != nil {
+		if _, err := s.createEvent(ctx, nil, "info", "system.seeded", "Загружен шаблон локальной сметы", ""); err != nil {
 			return err
 		}
 	}
@@ -194,7 +209,7 @@ func (s *Service) EnsureSeedData(ctx context.Context) error {
 }
 
 func (s *Service) ListTemplates(ctx context.Context) ([]domain.Template, error) {
-	return s.templates.ListTemplates(ctx)
+	return s.listTemplatesCached(ctx)
 }
 
 func (s *Service) GetTemplate(ctx context.Context, id string) (domain.Template, error) {
@@ -292,6 +307,9 @@ func (s *Service) CreateTemplate(ctx context.Context, input CreateTemplateInput)
 		return domain.Template{}, err
 	}
 
+	s.registerStoredFile(ctx, "templates", storedFile, platform.EntityTypeTemplate, template.ID, input.Content)
+	s.invalidateTemplatesCache(ctx)
+
 	return template, nil
 }
 
@@ -346,11 +364,32 @@ func (s *Service) CreateMobileVoiceRequest(ctx context.Context, input CreateMobi
 		return MobileVoiceRequestResult{}, errors.New("voice recording is required")
 	}
 
+	template, err := s.resolveEstimateTemplateID(ctx, input.TemplateID)
+	if err != nil {
+		return MobileVoiceRequestResult{}, err
+	}
+
+	fileName = sanitizeFileName(fileName, "voice-note.m4a")
+	mimeType = fallbackString(mimeType, "audio/mp4")
+
+	transcript, err := s.transcribeVoice(ctx, fileName, mimeType, content)
+	if err != nil {
+		return MobileVoiceRequestResult{}, err
+	}
+	if manual := strings.TrimSpace(input.Payload); manual != "" {
+		transcript = strings.TrimSpace(transcript + "\n" + manual)
+	}
+
+	payload, estimate, err := s.buildEstimatePayload(transcript)
+	if err != nil {
+		return MobileVoiceRequestResult{}, err
+	}
+
 	job, err := s.CreateJob(ctx, CreateJobInput{
-		TemplateID:      input.TemplateID,
-		SourceName:      input.SourceName,
+		TemplateID:      template.ID,
+		SourceName:      estimateSourceName(input.SourceName, estimate),
 		RequestedBy:     fallbackString(input.RequestedBy, "mobile-app"),
-		Payload:         input.Payload,
+		Payload:         payload,
 		DeliveryChannel: input.DeliveryChannel,
 		DeliveryAddress: input.DeliveryAddress,
 	})
@@ -358,8 +397,6 @@ func (s *Service) CreateMobileVoiceRequest(ctx context.Context, input CreateMobi
 		return MobileVoiceRequestResult{}, err
 	}
 
-	fileName = sanitizeFileName(fileName, "voice-note.m4a")
-	mimeType = fallbackString(mimeType, "audio/mp4")
 	storedFile, err := s.storage.Save(ctx, "source", fileName, content)
 	if err != nil {
 		return MobileVoiceRequestResult{}, err
@@ -384,6 +421,12 @@ func (s *Service) CreateMobileVoiceRequest(ctx context.Context, input CreateMobi
 	if _, err := s.createEvent(ctx, &job.ID, "info", "source_document.uploaded", "Сохранена голосовая запись из мобильного приложения", sourceDocument.FileName); err != nil {
 		return MobileVoiceRequestResult{}, err
 	}
+	if _, err := s.createEvent(ctx, &job.ID, "info", "voice.transcribed", "Голос распознан и разобран в поля сметы", previewEstimateFields(estimate)); err != nil {
+		return MobileVoiceRequestResult{}, err
+	}
+
+	s.registerStoredFile(ctx, "source", storedFile, platform.EntityTypeSourceDocument, sourceDocument.ID, content)
+	s.saveVoiceTranscription(ctx, platform.TranscriptionSourceMobileVoice, transcript, &job.ID, &sourceDocument.ID)
 
 	result := MobileVoiceRequestResult{
 		Job:            job,
@@ -538,19 +581,27 @@ func (s *Service) ProcessNextQueuedJob(ctx context.Context) (bool, error) {
 	}
 
 	processingStartedAt := time.Now()
+	attemptID, err := s.beginJobAttempt(ctx, job.ID)
+	if err != nil {
+		return true, err
+	}
+
 	if _, err := s.createEvent(ctx, &job.ID, "info", "job.started", "Заявка из очереди взята в обработку", ""); err != nil {
+		s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusFailed, err)
 		return true, err
 	}
 
 	template, err := s.templates.GetTemplateByID(ctx, job.TemplateID)
 	if err != nil {
+		s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusFailed, err)
 		return true, s.failJob(ctx, job, processingStartedAt, fmt.Errorf("load template: %w", err))
 	}
 
 	fileName := sanitizeFileName(fmt.Sprintf("%s-%s.txt", job.TemplateName, job.ID), "generated-document.txt")
-	content := []byte(s.renderDocument(job, template))
+	content := []byte(s.renderDocumentForTemplate(job, template))
 	storedFile, err := s.storage.Save(ctx, "generated", fileName, content)
 	if err != nil {
+		s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusFailed, err)
 		return true, s.failJob(ctx, job, processingStartedAt, fmt.Errorf("store generated document: %w", err))
 	}
 
@@ -566,8 +617,11 @@ func (s *Service) ProcessNextQueuedJob(ctx context.Context) (bool, error) {
 		CreatedAt:    s.now().UTC(),
 	})
 	if err != nil {
+		s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusFailed, err)
 		return true, s.failJob(ctx, job, processingStartedAt, fmt.Errorf("insert generated document: %w", err))
 	}
+
+	s.registerStoredFile(ctx, "generated", storedFile, platform.EntityTypeGeneratedDocument, document.ID, content)
 
 	completedAt := s.now().UTC()
 	startedAt := job.StartedAt
@@ -585,17 +639,22 @@ func (s *Service) ProcessNextQueuedJob(ctx context.Context) (bool, error) {
 		UpdatedAt:        completedAt,
 	})
 	if err != nil {
+		s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusFailed, err)
 		return true, s.failJob(ctx, job, processingStartedAt, fmt.Errorf("complete job: %w", err))
 	}
 
 	if _, err := s.createEvent(ctx, &updatedJob.ID, "info", "document.generated", "Сформирован итоговый документ", document.FileName); err != nil {
+		s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusFailed, err)
 		return true, err
 	}
 
 	updatedJob, err = s.routeCompletedJob(ctx, updatedJob, document)
 	if err != nil {
+		s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusFailed, err)
 		return true, err
 	}
+
+	s.finishJobAttempt(ctx, attemptID, platform.AttemptStatusCompleted, nil)
 
 	if s.metrics != nil {
 		s.metrics.RecordJobProcessed(domain.StatusCompleted, time.Since(processingStartedAt))
@@ -890,6 +949,13 @@ func (s *Service) syncJobStatusMetrics(ctx context.Context) error {
 
 	s.metrics.SyncJobStatusCounts(counts)
 	return nil
+}
+
+func (s *Service) renderDocumentForTemplate(job domain.Job, template domain.Template) string {
+	if estimateintent.IsEstimateCategory(template.Category) {
+		return s.renderEstimateDocument(job, template)
+	}
+	return s.renderDocument(job, template)
 }
 
 func (s *Service) renderDocument(job domain.Job, template domain.Template) string {

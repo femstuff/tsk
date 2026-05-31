@@ -8,7 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"tsk/backend-api/internal/application/voiceintent"
+	platform "tsk/backend-api/internal/domain/platform"
+	domain "tsk/backend-api/internal/domain/documentjob"
+	"tsk/backend-api/internal/infrastructure/cache"
 	"tsk/backend-api/internal/integrations/bitrixclient"
 )
 
@@ -91,6 +96,31 @@ func (s *Service) RunMobileBitrixIntent(ctx context.Context, in MobileBitrixInte
 		err = fmt.Errorf("укажите текст запроса или приложите аудио")
 		return res, err
 	}
+
+	var persistedSourceID *string
+	if len(in.Audio) > 0 {
+		fn := sanitizeFileName(in.FileName, "mobile-voice.m4a")
+		mt := fallbackString(strings.TrimSpace(in.MimeType), "audio/mp4")
+		storedFile, saveErr := s.storage.Save(ctx, "source", fn, in.Audio)
+		if saveErr == nil {
+			src, docErr := s.sourceDocuments.CreateSourceDocument(ctx, domain.SourceDocumentCreateParams{
+				ID:         "src-" + uuid.NewString(),
+				Kind:       domain.SourceDocumentKindVoiceRecording,
+				Origin:     "mobile-app-bitrix",
+				FileName:   storedFile.FileName,
+				MimeType:   mt,
+				StorageKey: storedFile.StorageKey,
+				SizeBytes:  storedFile.SizeBytes,
+				CreatedAt:  s.now().UTC(),
+			})
+			if docErr == nil {
+				persistedSourceID = &src.ID
+				s.registerStoredFile(ctx, "source", storedFile, platform.EntityTypeSourceDocument, src.ID, in.Audio)
+			}
+		}
+	}
+
+	s.saveTranscription(ctx, platform.TranscriptionSourceMobileBitrixIntent, transcript, nil, persistedSourceID)
 
 	adminHints := AdminVoiceBitrixInput{
 		DealIDOverride:    in.DealIDOverride,
@@ -190,6 +220,7 @@ type BitrixMobileTasksResponse struct {
 	ResponsibleUserID int                       `json:"responsibleUserId"`
 	Stats             BitrixMobileTaskStats     `json:"stats"`
 	Items             []bitrixclient.BitrixTaskBrief `json:"items"`
+	AuthMode          string                    `json:"authMode,omitempty"`
 }
 
 func bitrixTaskClosed(t bitrixclient.BitrixTaskBrief) bool {
@@ -235,10 +266,115 @@ func computeBitrixTaskStats(items []bitrixclient.BitrixTaskBrief, now time.Time)
 	return st
 }
 
-// ListBitrixTasksForMobile — задачи, где ответственный = владелец вебхука (или responsibleOverride из query).
-func (s *Service) ListBitrixTasksForMobile(ctx context.Context, limit int, responsibleOverride int) (BitrixMobileTasksResponse, error) {
+func bitrixTaskStatusLabel(status string, closed bool) string {
+	if closed {
+		return "Завершена"
+	}
+	switch strings.TrimSpace(status) {
+	case "2":
+		return "Ждёт выполнения"
+	case "3":
+		return "В работе"
+	case "4":
+		return "Завершена"
+	case "5", "6":
+		return "Отложена"
+	case "7":
+		return "Отклонена"
+	default:
+		if status == "" {
+			return "Неизвестно"
+		}
+		return "Статус " + status
+	}
+}
+
+func bitrixTaskMatchesFilter(t bitrixclient.BitrixTaskBrief, filter string, now time.Time) bool {
+	closed := bitrixTaskClosed(t)
+	switch filter {
+	case "completed":
+		return closed
+	case "in_progress":
+		return !closed && strings.TrimSpace(t.Status) == "3"
+	case "overdue":
+		if closed {
+			return false
+		}
+		dl, ok := parseBitrixDeadline(t.Deadline)
+		return ok && now.After(dl)
+	case "open":
+		return !closed
+	default:
+		return false
+	}
+}
+
+func mapAdminBitrixTaskItems(items []bitrixclient.BitrixTaskBrief) []AdminBitrixTaskItemView {
+	out := make([]AdminBitrixTaskItemView, 0, len(items))
+	for _, task := range items {
+		closed := bitrixTaskClosed(task)
+		out = append(out, AdminBitrixTaskItemView{
+			ID:          task.ID,
+			Title:       task.Title,
+			Status:      task.Status,
+			StatusLabel: bitrixTaskStatusLabel(task.Status, closed),
+			Deadline:    task.Deadline,
+			ClosedDate:  task.ClosedDate,
+		})
+	}
+	return out
+}
+
+// ListBitrixTasksForMobile — задачи ответственного: OAuth-сессия пользователя или вебхук (fallback).
+func (s *Service) ListBitrixTasksForMobile(ctx context.Context, limit int, responsibleOverride int, oauthSessionID string, skipCache bool) (BitrixMobileTasksResponse, error) {
 	var out BitrixMobileTasksResponse
+	oauthSessionID = strings.TrimSpace(oauthSessionID)
+
+	if oauthSessionID != "" && s.BitrixOAuthEnabled() {
+		session, sessionErr := s.ensureActiveBitrixSession(ctx, oauthSessionID)
+		if sessionErr != nil {
+			return out, sessionErr
+		}
+
+		tokenClient := bitrixclient.NewTokenREST(session.PortalDomain, session.RestEndpoint, session.AccessToken, s.httpClient)
+		if session.BitrixUserID <= 0 {
+			return out, errors.New("не удалось определить пользователя Bitrix для сессии")
+		}
+		rid := session.BitrixUserID
+		if responsibleOverride > 0 {
+			rid = responsibleOverride
+		}
+
+		cacheKey := cache.BitrixTasksKey(rid, limit) + ":oauth:v3:" + oauthSessionID
+		if !skipCache && s.cache != nil {
+			if payload, ok, err := s.cache.Get(ctx, cacheKey); err == nil && ok {
+				if json.Unmarshal(payload, &out) == nil {
+					return out, nil
+				}
+			}
+		}
+
+		items, err := tokenClient.ListTasksForUser(ctx, rid, limit)
+		if err != nil {
+			return out, bitrixclient.TasksListUserError(err)
+		}
+		out.ResponsibleUserID = rid
+		out.Items = items
+		out.Stats = computeBitrixTaskStats(items, s.now().In(time.Local))
+		out.AuthMode = "oauth"
+
+		if s.cache != nil {
+			if payload, err := json.Marshal(out); err == nil {
+				_ = s.cache.Set(ctx, cacheKey, payload, cacheBitrixTasksTTL)
+			}
+		}
+		return out, nil
+	}
+
 	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		if s.BitrixOAuthEnabled() {
+			return out, fmt.Errorf("войдите в Bitrix24 в приложении или настройте BITRIX_WEBHOOK_URL на сервере")
+		}
 		return out, fmt.Errorf("BITRIX_WEBHOOK_URL не настроен на сервере")
 	}
 	rid := responsibleOverride
@@ -249,6 +385,16 @@ func (s *Service) ListBitrixTasksForMobile(ctx context.Context, limit int, respo
 			return out, fmt.Errorf("не удалось определить пользователя вебхука: %w; укажите query responsibleId=…", err)
 		}
 	}
+
+	cacheKey := cache.BitrixTasksKey(rid, limit)
+	if !skipCache && s.cache != nil {
+		if payload, ok, err := s.cache.Get(ctx, cacheKey); err == nil && ok {
+			if json.Unmarshal(payload, &out) == nil {
+				return out, nil
+			}
+		}
+	}
+
 	items, err := s.bitrix.ListTasksForResponsible(ctx, rid, limit)
 	if err != nil {
 		return out, err
@@ -256,5 +402,108 @@ func (s *Service) ListBitrixTasksForMobile(ctx context.Context, limit int, respo
 	out.ResponsibleUserID = rid
 	out.Items = items
 	out.Stats = computeBitrixTaskStats(items, s.now().In(time.Local))
+	out.AuthMode = "webhook"
+
+	if s.cache != nil {
+		if payload, err := json.Marshal(out); err == nil {
+			_ = s.cache.Set(ctx, cacheKey, payload, cacheBitrixTasksTTL)
+		}
+	}
+
 	return out, nil
+}
+
+func (s *Service) invalidateBitrixTaskListCache(ctx context.Context, rid, limit int, oauthSessionID string) {
+	if s.cache == nil {
+		return
+	}
+	oauthSessionID = strings.TrimSpace(oauthSessionID)
+	if oauthSessionID != "" {
+		_ = s.cache.Delete(ctx, cache.BitrixTasksKey(rid, limit)+":oauth:v3:"+oauthSessionID)
+	}
+	_ = s.cache.Delete(ctx, cache.BitrixTasksKey(rid, limit))
+}
+
+// GetBitrixTaskForMobile — карточка задачи (описание и поля).
+func (s *Service) GetBitrixTaskForMobile(ctx context.Context, taskID, oauthSessionID string) (bitrixclient.BitrixTaskDetail, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return bitrixclient.BitrixTaskDetail{}, errors.New("task id is required")
+	}
+	oauthSessionID = strings.TrimSpace(oauthSessionID)
+
+	if oauthSessionID != "" && s.BitrixOAuthEnabled() {
+		session, err := s.ensureActiveBitrixSession(ctx, oauthSessionID)
+		if err != nil {
+			return bitrixclient.BitrixTaskDetail{}, err
+		}
+		client := bitrixclient.NewTokenREST(session.PortalDomain, session.RestEndpoint, session.AccessToken, s.httpClient)
+		detail, err := client.GetTask(ctx, taskID)
+		if err != nil {
+			return bitrixclient.BitrixTaskDetail{}, bitrixclient.TasksListUserError(err)
+		}
+		return detail, nil
+	}
+
+	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		if s.BitrixOAuthEnabled() {
+			return bitrixclient.BitrixTaskDetail{}, fmt.Errorf("войдите в Bitrix24 в приложении или настройте BITRIX_WEBHOOK_URL на сервере")
+		}
+		return bitrixclient.BitrixTaskDetail{}, fmt.Errorf("BITRIX_WEBHOOK_URL не настроен на сервере")
+	}
+
+	detail, err := s.bitrix.GetTask(ctx, taskID)
+	if err != nil {
+		return bitrixclient.BitrixTaskDetail{}, err
+	}
+	return detail, nil
+}
+
+// UpdateBitrixTaskStatusForMobile — смена статуса задачи и возврат обновлённой карточки.
+func (s *Service) UpdateBitrixTaskStatusForMobile(ctx context.Context, taskID string, status int, oauthSessionID string) (bitrixclient.BitrixTaskDetail, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return bitrixclient.BitrixTaskDetail{}, errors.New("task id is required")
+	}
+	if status <= 0 {
+		return bitrixclient.BitrixTaskDetail{}, errors.New("status is required")
+	}
+	oauthSessionID = strings.TrimSpace(oauthSessionID)
+
+	if oauthSessionID != "" && s.BitrixOAuthEnabled() {
+		session, err := s.ensureActiveBitrixSession(ctx, oauthSessionID)
+		if err != nil {
+			return bitrixclient.BitrixTaskDetail{}, err
+		}
+		client := bitrixclient.NewTokenREST(session.PortalDomain, session.RestEndpoint, session.AccessToken, s.httpClient)
+		if err := client.UpdateTaskStatus(ctx, taskID, status); err != nil {
+			return bitrixclient.BitrixTaskDetail{}, bitrixclient.TasksListUserError(err)
+		}
+		s.invalidateBitrixTaskListCache(ctx, session.BitrixUserID, 80, oauthSessionID)
+		s.invalidateBitrixTaskListCache(ctx, session.BitrixUserID, 60, oauthSessionID)
+		detail, err := client.GetTask(ctx, taskID)
+		if err != nil {
+			return bitrixclient.BitrixTaskDetail{}, bitrixclient.TasksListUserError(err)
+		}
+		return detail, nil
+	}
+
+	if s.bitrix == nil || !s.bitrix.WebhookConfigured() {
+		if s.BitrixOAuthEnabled() {
+			return bitrixclient.BitrixTaskDetail{}, fmt.Errorf("войдите в Bitrix24 в приложении или настройте BITRIX_WEBHOOK_URL на сервере")
+		}
+		return bitrixclient.BitrixTaskDetail{}, fmt.Errorf("BITRIX_WEBHOOK_URL не настроен на сервере")
+	}
+
+	if err := s.bitrix.UpdateTaskStatus(ctx, taskID, status); err != nil {
+		return bitrixclient.BitrixTaskDetail{}, err
+	}
+	rid, _ := s.bitrix.WebhookOwnerUserID()
+	s.invalidateBitrixTaskListCache(ctx, rid, 80, "")
+	s.invalidateBitrixTaskListCache(ctx, rid, 60, "")
+	detail, err := s.bitrix.GetTask(ctx, taskID)
+	if err != nil {
+		return bitrixclient.BitrixTaskDetail{}, err
+	}
+	return detail, nil
 }

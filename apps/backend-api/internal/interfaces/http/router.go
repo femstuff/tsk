@@ -28,7 +28,16 @@ func NewRouter(handler *Handler, collector *metrics.Collector) http.Handler {
 	mux.HandleFunc("PATCH /api/v1/document-jobs/{id}/status", handler.UpdateJobStatus)
 	mux.HandleFunc("POST /api/v1/mobile/voice-requests", handler.CreateMobileVoiceRequest)
 	mux.HandleFunc("POST /api/v1/mobile/bitrix-intent", handler.CreateMobileBitrixIntent)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix-deals", handler.ListMobileBitrixDeals)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix-deals/{id}", handler.GetMobileBitrixDeal)
+	mux.HandleFunc("PATCH /api/v1/mobile/bitrix-deals/{id}/stage", handler.UpdateMobileBitrixDealStage)
 	mux.HandleFunc("GET /api/v1/mobile/bitrix-tasks", handler.ListMobileBitrixTasks)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix-tasks/{id}", handler.GetMobileBitrixTask)
+	mux.HandleFunc("PATCH /api/v1/mobile/bitrix-tasks/{id}/status", handler.UpdateMobileBitrixTaskStatus)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix/oauth/start", handler.StartMobileBitrixOAuth)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix/oauth/callback", handler.MobileBitrixOAuthCallback)
+	mux.HandleFunc("GET /api/v1/mobile/bitrix/oauth/session", handler.GetMobileBitrixOAuthSession)
+	mux.HandleFunc("DELETE /api/v1/mobile/bitrix/oauth/session", handler.DeleteMobileBitrixOAuthSession)
 	mux.HandleFunc("GET /api/v1/source-documents", handler.ListSourceDocuments)
 	mux.HandleFunc("GET /api/v1/source-documents/{id}/download", handler.DownloadSourceDocument)
 	mux.HandleFunc("GET /api/v1/generated-documents", handler.ListGeneratedDocuments)
@@ -36,7 +45,10 @@ func NewRouter(handler *Handler, collector *metrics.Collector) http.Handler {
 	mux.HandleFunc("GET /api/v1/task-commands", handler.ListTaskCommands)
 	mux.HandleFunc("POST /api/v1/task-commands", handler.CreateTaskCommand)
 	mux.HandleFunc("GET /api/v1/processing-events", handler.ListProcessingEvents)
+	mux.HandleFunc("GET /api/v1/app-settings", handler.ListAppSettings)
 	mux.HandleFunc("POST /api/v1/admin/voice-bitrix-pipeline", handler.AdminVoiceBitrixPipeline)
+	mux.HandleFunc("GET /api/v1/admin/observability/dashboard", handler.AdminObservabilityDashboard)
+	mux.HandleFunc("GET /api/v1/admin/dashboard", handler.AdminDashboard)
 	mux.Handle("GET /metrics", collector.Handler())
 
 	return withObservability(withCORS(mux), collector)
@@ -45,8 +57,8 @@ func NewRouter(handler *Handler, collector *metrics.Collector) http.Handler {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-TSK-Request-Source, X-TSK-Bitrix-Session")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -85,7 +97,7 @@ func isBusinessRequest(r *http.Request, normalizedPath string) bool {
 	}
 
 	switch normalizedPath {
-	case "/metrics", "/health", "/api/v1/health":
+	case "/metrics", "/health", "/api/v1/health", "/api/v1/admin/observability/dashboard":
 		return false
 	}
 

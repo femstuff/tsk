@@ -354,6 +354,9 @@ func parseTasksListResult(raw json.RawMessage) ([]BitrixTaskBrief, error) {
 func mapSliceToTaskBriefs(rows []map[string]any) []BitrixTaskBrief {
 	out := make([]BitrixTaskBrief, 0, len(rows))
 	for _, row := range rows {
+		if nested, ok := row["task"].(map[string]any); ok {
+			row = nested
+		}
 		id := fieldFromRow(row, "id", "ID")
 		title := fieldFromRow(row, "title", "TITLE")
 		status := fieldFromRow(row, "status", "STATUS")

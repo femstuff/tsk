@@ -5,8 +5,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StatusBar as RNStatusBar,
   StyleSheet,
@@ -16,6 +18,7 @@ import {
 } from "react-native";
 
 import type {
+  BitrixDealSummary,
   BitrixTaskStats,
   BitrixTaskSummary,
   DocumentJobSummary,
@@ -29,6 +32,7 @@ import {
   createMobileVoiceRequest,
   getHealth,
   getMobileApiBaseUrl,
+  listBitrixDeals,
   listBitrixTasks,
   listJobs,
   listSourceDocuments,
@@ -41,13 +45,44 @@ import {
   type RequestLogEntry,
   type RequestLogKind
 } from "../shared/api/requestLog";
+import { useBitrixAuth } from "../features/bitrix/useBitrixAuth";
+import { BitrixDealDetailModal } from "../features/bitrix/BitrixDealDetailModal";
+import { BitrixTaskDetailModal } from "../features/bitrix/BitrixTaskDetailModal";
+import { bitrixTaskStatusRu } from "../features/bitrix/bitrixTaskUi";
 
 const HEADER_BLUE = "#2563eb";
 const BG = "#e8eef5";
 
-type MainTab = "home" | "tasks" | "docs" | "more";
+type MainTab = "home" | "tasks" | "deals" | "docs" | "more";
 
 type LogFilterTab = "all" | RequestLogKind | "errors";
+
+type RecordingPhase = "idle" | "recording" | "stopping" | "ready";
+
+type SubmitProgressState = {
+  title: string;
+  message: string;
+  step: number;
+  totalSteps: number;
+  elapsedSec: number;
+};
+
+const ESTIMATE_SUBMIT_STEPS = [
+  "Отправка аудио на сервер…",
+  "Распознавание речи (Whisper) — обычно 30–90 сек…",
+  "Разбор полей сметы и сохранение…"
+];
+
+const BITRIX_VOICE_SUBMIT_STEPS = [
+  "Отправка аудио на сервер…",
+  "Распознавание речи (Whisper) — обычно 30–90 сек…",
+  "Выполнение действия в Bitrix24…"
+];
+
+const BITRIX_TEXT_SUBMIT_STEPS = [
+  "Отправка текста на сервер…",
+  "Выполнение действия в Bitrix24…"
+];
 
 function actionLabelRu(code: string | undefined) {
   if (!code) {
@@ -61,19 +96,6 @@ function actionLabelRu(code: string | undefined) {
     none: "Не распознано"
   };
   return map[code] ?? code;
-}
-
-function bitrixTaskStatusRu(status: string) {
-  const map: Record<string, string> = {
-    "1": "Новая",
-    "2": "Ждёт выполнения",
-    "3": "В работе",
-    "4": "Ждёт контроля",
-    "5": "Завершена",
-    "6": "Отложена",
-    "7": "Отклонена"
-  };
-  return map[String(status).trim()] ?? `Статус ${status}`;
 }
 
 function formatDate(value: string | null) {
@@ -111,20 +133,36 @@ export function HomeScreen() {
   const [bitrixTasks, setBitrixTasks] = useState<BitrixTaskSummary[]>([]);
   const [bitrixTaskStats, setBitrixTaskStats] = useState<BitrixTaskStats | null>(null);
   const [bitrixResponsibleId, setBitrixResponsibleId] = useState<number | null>(null);
+  const [bitrixAuthMode, setBitrixAuthMode] = useState<string | null>(null);
+  const [bitrixTasksError, setBitrixTasksError] = useState<string | null>(null);
+  const [bitrixDeals, setBitrixDeals] = useState<BitrixDealSummary[]>([]);
+  const [bitrixDealsError, setBitrixDealsError] = useState<string | null>(null);
+  const [bitrixDealsSearch, setBitrixDealsSearch] = useState("");
+  const [bitrixDealsLoading, setBitrixDealsLoading] = useState(false);
+  const [bitrixDealsAuthMode, setBitrixDealsAuthMode] = useState<string | null>(null);
+  const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [submittingRequest, setSubmittingRequest] = useState(false);
   const [submittingBitrix, setSubmittingBitrix] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [docRecording, setDocRecording] = useState<Audio.Recording | null>(null);
+  const [docRecordingPhase, setDocRecordingPhase] = useState<RecordingPhase>("idle");
   const [docAudioUri, setDocAudioUri] = useState<string | null>(null);
   const [bitrixRecording, setBitrixRecording] = useState<Audio.Recording | null>(null);
+  const [bitrixRecordingPhase, setBitrixRecordingPhase] = useState<RecordingPhase>("idle");
   const [bitrixAudioUri, setBitrixAudioUri] = useState<string | null>(null);
+  const docRecordingRef = useRef<Audio.Recording | null>(null);
+  const bitrixRecordingRef = useRef<Audio.Recording | null>(null);
+  const submitProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const submitElapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [submitProgress, setSubmitProgress] = useState<SubmitProgressState | null>(null);
   const previewSoundRef = useRef<Audio.Sound | null>(null);
   const [previewPlayingUri, setPreviewPlayingUri] = useState<string | null>(null);
   const [requestLogEntries, setRequestLogEntries] = useState<RequestLogEntry[]>([]);
   const [logFilter, setLogFilter] = useState<LogFilterTab>("all");
   const [logExpanded, setLogExpanded] = useState(false);
-  const [docVoiceSectionOpen, setDocVoiceSectionOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>("home");
   const [docVoiceOpen, setDocVoiceOpen] = useState(false);
   const [bitrixVoiceOpen, setBitrixVoiceOpen] = useState(false);
@@ -135,6 +173,7 @@ export function HomeScreen() {
     dealHint: "",
     stageHint: ""
   });
+  const bitrixAuth = useBitrixAuth();
 
   const [requestForm, setRequestForm] = useState({
     templateId: "",
@@ -146,18 +185,113 @@ export function HomeScreen() {
     taskCommandText: "",
     taskTarget: "bitrix24" as "bitrix24" | "email_approval"
   });
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refreshAfterSubmit = useCallback(async () => {
+    try {
+      const [nextJobs, nextSourceDocuments] = await Promise.all([listJobs(), listSourceDocuments()]);
+      setJobs(nextJobs.filter((job) => job.requestedBy === "mobile-app"));
+      setSourceDocuments(nextSourceDocuments.filter((document) => document.origin === "mobile-app"));
+    } catch {
+      // Не блокируем успешную отправку из-за фонового обновления списков.
+    }
+  }, []);
+
+  const clearSubmitProgressTimers = useCallback(() => {
+    if (submitProgressTimerRef.current) {
+      clearInterval(submitProgressTimerRef.current);
+      submitProgressTimerRef.current = null;
+    }
+    if (submitElapsedTimerRef.current) {
+      clearInterval(submitElapsedTimerRef.current);
+      submitElapsedTimerRef.current = null;
+    }
+  }, []);
+
+  const beginSubmitProgress = useCallback(
+    (title: string, steps: string[]) => {
+      clearSubmitProgressTimers();
+      setSubmitProgress({
+        title,
+        message: steps[0] ?? "Обработка…",
+        step: 1,
+        totalSteps: steps.length,
+        elapsedSec: 0
+      });
+
+      submitElapsedTimerRef.current = setInterval(() => {
+        setSubmitProgress((current) =>
+          current ? { ...current, elapsedSec: current.elapsedSec + 1 } : current
+        );
+      }, 1000);
+
+      submitProgressTimerRef.current = setInterval(() => {
+        setSubmitProgress((current) => {
+          if (!current) {
+            return current;
+          }
+          const nextStep = Math.min(current.step + 1, current.totalSteps);
+          return {
+            ...current,
+            step: nextStep,
+            message: steps[nextStep - 1] ?? current.message
+          };
+        });
+      }, 12_000);
+    },
+    [clearSubmitProgressTimers]
+  );
+
+  const endSubmitProgress = useCallback(() => {
+    clearSubmitProgressTimers();
+    setSubmitProgress(null);
+  }, [clearSubmitProgressTimers]);
+
+  useEffect(() => {
+    return () => {
+      clearSubmitProgressTimers();
+    };
+  }, [clearSubmitProgressTimers]);
+
+  const loadBitrixDeals = useCallback(async (search: string, refresh = false) => {
+    setBitrixDealsLoading(true);
+    setBitrixDealsError(null);
+    try {
+      const bundle = await listBitrixDeals(80, search, refresh);
+      setBitrixDeals(Array.isArray(bundle.items) ? bundle.items : []);
+      setBitrixDealsAuthMode(typeof bundle.authMode === "string" ? bundle.authMode : null);
+    } catch (err) {
+      setBitrixDeals([]);
+      setBitrixDealsAuthMode(null);
+      setBitrixDealsError(err instanceof Error ? err.message : "Не удалось загрузить сделки Bitrix24");
+    } finally {
+      setBitrixDealsLoading(false);
+    }
+  }, []);
+
+  const refresh = useCallback(async (options?: { pull?: boolean }) => {
+    if (options?.pull) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     try {
-      const [nextHealth, nextTemplates, nextJobs, nextSourceDocuments, bitrixBundle] =
-        await Promise.all([
-          getHealth(),
-          listTemplates(),
-          listJobs(),
-          listSourceDocuments(),
-          listBitrixTasks(80).catch(() => null)
-        ]);
+      const [nextHealth, nextTemplates, nextJobs, nextSourceDocuments] = await Promise.all([
+        getHealth(),
+        listTemplates(),
+        listJobs(),
+        listSourceDocuments()
+      ]);
+
+      let bitrixBundle: Awaited<ReturnType<typeof listBitrixTasks>> | null = null;
+      let nextBitrixError: string | null = null;
+      try {
+        bitrixBundle = await listBitrixTasks(80, undefined, Boolean(options?.pull));
+      } catch (bitrixErr) {
+        nextBitrixError =
+          bitrixErr instanceof Error ? bitrixErr.message : "Не удалось загрузить задачи Bitrix24";
+      }
+      setBitrixTasksError(nextBitrixError);
+
       setHealth(nextHealth);
       setTemplates(nextTemplates);
       const mobileJobs = nextJobs.filter((job) => job.requestedBy === "mobile-app");
@@ -171,17 +305,48 @@ export function HomeScreen() {
         setBitrixResponsibleId(
           typeof bitrixBundle.responsibleUserId === "number" ? bitrixBundle.responsibleUserId : null
         );
+        setBitrixAuthMode(typeof bitrixBundle.authMode === "string" ? bitrixBundle.authMode : null);
       } else {
         setBitrixTasks([]);
         setBitrixTaskStats(null);
         setBitrixResponsibleId(null);
+        setBitrixAuthMode(null);
       }
+
+      await loadBitrixDeals(bitrixDealsSearch, Boolean(options?.pull));
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Ошибка загрузки");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
+  }, [bitrixDealsSearch, loadBitrixDeals]);
+
+  const openTaskDetail = useCallback((taskId: string) => {
+    setSelectedTaskId(taskId);
   }, []);
+
+  const closeTaskDetail = useCallback(() => {
+    setSelectedTaskId(null);
+  }, []);
+
+  const openDealDetail = useCallback((dealId: string) => {
+    setSelectedDealId(dealId);
+  }, []);
+
+  const closeDealDetail = useCallback(() => {
+    setSelectedDealId(null);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== "deals") {
+      return;
+    }
+    const timer = setTimeout(() => {
+      void loadBitrixDeals(bitrixDealsSearch, true);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [activeTab, bitrixDealsSearch, loadBitrixDeals]);
 
   useEffect(() => {
     void refresh();
@@ -207,17 +372,24 @@ export function HomeScreen() {
     };
   }, []);
 
+  const estimateTemplate = useMemo(
+    () =>
+      templates.find((template) => {
+        const cat = template.category.toLowerCase();
+        return cat === "estimate" || cat === "smeta" || cat === "смета" || cat === "сметы";
+      }) ?? null,
+    [templates]
+  );
+
   useEffect(() => {
-    return () => {
-      const sound = previewSoundRef.current;
-      previewSoundRef.current = null;
-      void sound?.unloadAsync();
-    };
-  }, []);
+    if (estimateTemplate && !requestForm.templateId) {
+      setRequestForm((current) => ({ ...current, templateId: estimateTemplate.id }));
+    }
+  }, [estimateTemplate, requestForm.templateId]);
 
   const selectedTemplate = useMemo(
-    () => templates.find((template) => template.id === requestForm.templateId) ?? null,
-    [requestForm.templateId, templates]
+    () => templates.find((template) => template.id === requestForm.templateId) ?? estimateTemplate,
+    [requestForm.templateId, templates, estimateTemplate]
   );
 
   const filteredRequestLog = useMemo(() => {
@@ -297,28 +469,34 @@ export function HomeScreen() {
 
   const resetDocRecordingDraft = useCallback(async () => {
     await stopPreviewPlayback();
-    if (docRecording) {
+    const recording = docRecordingRef.current ?? docRecording;
+    if (recording) {
       try {
-        await docRecording.stopAndUnloadAsync();
+        await recording.stopAndUnloadAsync();
       } catch {
         // ignore
       }
-      setDocRecording(null);
     }
+    docRecordingRef.current = null;
+    setDocRecording(null);
     setDocAudioUri(null);
+    setDocRecordingPhase("idle");
   }, [docRecording, stopPreviewPlayback]);
 
   const resetBitrixRecordingDraft = useCallback(async () => {
     await stopPreviewPlayback();
-    if (bitrixRecording) {
+    const recording = bitrixRecordingRef.current ?? bitrixRecording;
+    if (recording) {
       try {
-        await bitrixRecording.stopAndUnloadAsync();
+        await recording.stopAndUnloadAsync();
       } catch {
         // ignore
       }
-      setBitrixRecording(null);
     }
+    bitrixRecordingRef.current = null;
+    setBitrixRecording(null);
     setBitrixAudioUri(null);
+    setBitrixRecordingPhase("idle");
   }, [bitrixRecording, stopPreviewPlayback]);
 
   const startDocRecording = async () => {
@@ -336,7 +514,10 @@ export function HomeScreen() {
       const created = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.HIGH_QUALITY
       );
+      docRecordingRef.current = created.recording;
       setDocRecording(created.recording);
+      setDocAudioUri(null);
+      setDocRecordingPhase("recording");
     } catch (nextError) {
       const message =
         nextError instanceof Error ? nextError.message : "Не удалось начать запись";
@@ -346,15 +527,32 @@ export function HomeScreen() {
   };
 
   const stopDocRecording = async () => {
-    if (!docRecording) {
+    const recording = docRecordingRef.current ?? docRecording;
+    if (!recording) {
       return;
     }
+    setDocRecordingPhase("stopping");
     try {
-      await docRecording.stopAndUnloadAsync();
-      const uri = docRecording.getURI();
-      setDocAudioUri(uri ?? null);
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      docRecordingRef.current = null;
       setDocRecording(null);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true
+      });
+      if (uri) {
+        setDocAudioUri(uri);
+        setDocRecordingPhase("ready");
+      } else {
+        setDocAudioUri(null);
+        setDocRecordingPhase("idle");
+        Alert.alert("Запись", "Не удалось сохранить файл. Попробуйте записать ещё раз.");
+      }
     } catch (nextError) {
+      docRecordingRef.current = null;
+      setDocRecording(null);
+      setDocRecordingPhase("idle");
       setError(nextError instanceof Error ? nextError.message : "Не удалось остановить запись");
     }
   };
@@ -374,7 +572,10 @@ export function HomeScreen() {
       const created = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.HIGH_QUALITY
       );
+      bitrixRecordingRef.current = created.recording;
       setBitrixRecording(created.recording);
+      setBitrixAudioUri(null);
+      setBitrixRecordingPhase("recording");
     } catch (nextError) {
       const message =
         nextError instanceof Error ? nextError.message : "Не удалось начать запись";
@@ -384,45 +585,71 @@ export function HomeScreen() {
   };
 
   const stopBitrixRecording = async () => {
-    if (!bitrixRecording) {
+    const recording = bitrixRecordingRef.current ?? bitrixRecording;
+    if (!recording) {
       return;
     }
+    setBitrixRecordingPhase("stopping");
     try {
-      await bitrixRecording.stopAndUnloadAsync();
-      const uri = bitrixRecording.getURI();
-      setBitrixAudioUri(uri ?? null);
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      bitrixRecordingRef.current = null;
       setBitrixRecording(null);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true
+      });
+      if (uri) {
+        setBitrixAudioUri(uri);
+        setBitrixRecordingPhase("ready");
+      } else {
+        setBitrixAudioUri(null);
+        setBitrixRecordingPhase("idle");
+        Alert.alert("Запись", "Не удалось сохранить файл. Попробуйте записать ещё раз.");
+      }
     } catch (nextError) {
+      bitrixRecordingRef.current = null;
+      setBitrixRecording(null);
+      setBitrixRecordingPhase("idle");
       setError(nextError instanceof Error ? nextError.message : "Не удалось остановить запись");
     }
   };
 
   const submitVoiceRequest = async () => {
-    if (!docAudioUri || !requestForm.templateId || !requestForm.sourceName.trim()) {
+    if (!docAudioUri || !selectedTemplate) {
       return;
     }
     setSubmittingRequest(true);
+    beginSubmitProgress("Формирование сметы", ESTIMATE_SUBMIT_STEPS);
     try {
       await createMobileVoiceRequest({
         ...requestForm,
+        templateId: selectedTemplate.id,
+        sourceName: requestForm.sourceName.trim() || selectedTemplate.name,
         audioUri: docAudioUri,
         audioFileName: `voice-request-${Date.now()}.m4a`,
         audioMimeType: "audio/mp4"
       });
       await stopPreviewPlayback();
       setDocAudioUri(null);
+      setDocRecordingPhase("idle");
       setRequestForm((current) => ({
         ...current,
         sourceName: "",
         payload: "",
         taskCommandText: ""
       }));
-      await refresh();
+      void refreshAfterSubmit();
       setDocVoiceOpen(false);
-      Alert.alert("Готово", "Голосовая заявка отправлена на сервер.");
+      Alert.alert("Готово", "Смета отправлена: голос распознан и поставлен в очередь на формирование.");
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Ошибка отправки");
+      Alert.alert(
+        "Ошибка отправки",
+        nextError instanceof Error ? nextError.message : "Не удалось отправить смету"
+      );
     } finally {
+      endSubmitProgress();
       setSubmittingRequest(false);
     }
   };
@@ -437,6 +664,7 @@ export function HomeScreen() {
       return;
     }
     setSubmittingBitrix(true);
+    beginSubmitProgress("Запрос в Bitrix24", BITRIX_TEXT_SUBMIT_STEPS);
     try {
       const item = await createMobileBitrixIntentText({
         text: bitrixIntentText.trim(),
@@ -446,11 +674,14 @@ export function HomeScreen() {
         stageHint: bitrixHints.stageHint.trim() || undefined
       });
       setBitrixIntentText("");
-      await refresh();
-      Alert.alert("Bitrix24", (item?.bitrixSteps ?? []).join("\n"));
+      void refresh();
+      Alert.alert("Bitrix24", (item?.bitrixSteps ?? []).join("\n") || "Запрос выполнен.");
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Ошибка Bitrix");
+      const message = nextError instanceof Error ? nextError.message : "Ошибка Bitrix";
+      setError(message);
+      Alert.alert("Bitrix24", message);
     } finally {
+      endSubmitProgress();
       setSubmittingBitrix(false);
     }
   };
@@ -461,6 +692,7 @@ export function HomeScreen() {
       return;
     }
     setSubmittingBitrix(true);
+    beginSubmitProgress("Голос в Bitrix24", BITRIX_VOICE_SUBMIT_STEPS);
     try {
       const item = await createMobileBitrixIntentMultipart({
         audioUri: bitrixAudioUri,
@@ -473,18 +705,124 @@ export function HomeScreen() {
       });
       await stopPreviewPlayback();
       setBitrixAudioUri(null);
+      setBitrixRecordingPhase("idle");
       setBitrixVoiceOpen(false);
-      await refresh();
-      Alert.alert("Bitrix24", (item?.bitrixSteps ?? []).join("\n"));
+      void refresh();
+      Alert.alert("Bitrix24", (item?.bitrixSteps ?? []).join("\n") || "Запрос выполнен.");
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Ошибка Bitrix");
+      const message = nextError instanceof Error ? nextError.message : "Ошибка Bitrix";
+      setError(message);
+      Alert.alert("Bitrix24", message);
     } finally {
+      endSubmitProgress();
       setSubmittingBitrix(false);
     }
   };
 
-  const openDocTile = (title: string) => {
-    Alert.alert(title, "Раздел в разработке. Пока используй список файлов во вкладке «Документы».");
+  const openEstimateVoice = () => {
+    if (estimateTemplate) {
+      setRequestForm((current) => ({ ...current, templateId: estimateTemplate.id }));
+    }
+    setDocVoiceOpen(true);
+  };
+
+  const renderRecordingControls = (
+    phase: RecordingPhase,
+    audioUri: string | null,
+    onStart: () => void,
+    onStop: () => void,
+    onReset: () => void,
+    onPreview: () => void
+  ) => {
+    if (phase === "recording") {
+      return (
+        <Pressable
+          onPress={onStop}
+          style={[styles.button, styles.secondaryButton, styles.submitWide]}
+        >
+          <Text style={styles.buttonTextDark}>Стоп</Text>
+        </Pressable>
+      );
+    }
+    if (phase === "stopping") {
+      return (
+        <View style={[styles.button, styles.secondaryButton, styles.submitWide, styles.buttonDisabled]}>
+          <ActivityIndicator color="#0f172a" />
+          <Text style={[styles.buttonTextDark, { marginTop: 6 }]}>Сохранение записи…</Text>
+        </View>
+      );
+    }
+    if (phase === "ready" && audioUri) {
+      return (
+        <>
+          <Pressable onPress={onPreview} style={[styles.button, styles.secondaryButton]}>
+            <Text style={styles.buttonTextDark}>
+              {previewPlayingUri === audioUri ? "Стоп" : "Прослушать"}
+            </Text>
+          </Pressable>
+          <Pressable onPress={onReset} style={[styles.button, styles.secondaryButton]}>
+            <Text style={styles.buttonTextDark}>Перезаписать</Text>
+          </Pressable>
+        </>
+      );
+    }
+    return (
+      <Pressable
+        onPress={onStart}
+        style={[styles.button, styles.primaryButton, styles.submitWide]}
+      >
+        <Text style={styles.buttonText}>Начать</Text>
+      </Pressable>
+    );
+  };
+
+  const recordingStatusText = (phase: RecordingPhase) => {
+    switch (phase) {
+      case "recording":
+        return "Идёт запись…";
+      case "stopping":
+        return "Сохранение записи…";
+      case "ready":
+        return "Аудио готово — можно прослушать или перезаписать.";
+      default:
+        return "Запись не сделана.";
+    }
+  };
+
+  const renderSubmitOverlay = () => {
+    if (!submitProgress) {
+      return null;
+    }
+    return (
+      <Modal visible transparent animationType="fade" onRequestClose={() => undefined}>
+        <View style={styles.progressOverlay}>
+          <View style={styles.progressCard}>
+            <ActivityIndicator size="large" color={HEADER_BLUE} />
+            <Text style={styles.progressTitle}>{submitProgress.title}</Text>
+            <Text style={styles.progressStep}>
+              Шаг {submitProgress.step} из {submitProgress.totalSteps}
+            </Text>
+            <Text style={styles.progressMessage}>{submitProgress.message}</Text>
+            <Text style={styles.progressElapsed}>Прошло {submitProgress.elapsedSec} сек</Text>
+            <Text style={styles.progressHint}>
+              Не закрывайте приложение. Первый запрос Whisper может занять до 2 минут.
+            </Text>
+          </View>
+        </View>
+      </Modal>
+    );
+  };
+
+  const renderBitrixSubmitBanner = () => {
+    if (!submittingBitrix || submitProgress) {
+      return null;
+    }
+    return (
+      <View style={styles.inlineProgress}>
+        <ActivityIndicator color={HEADER_BLUE} />
+        <Text style={styles.inlineProgressText}>Отправка в Bitrix24…</Text>
+      </View>
+    );
   };
 
   const renderBottomNav = () => (
@@ -506,7 +844,6 @@ export function HomeScreen() {
           />
           <Text style={[styles.navLabel, activeTab === "tasks" && styles.navLabelActive]}>Задачи</Text>
         </Pressable>
-        <View style={styles.navSpacer} />
         <Pressable style={styles.navItem} onPress={() => setActiveTab("docs")}>
           <Ionicons
             name="document-text-outline"
@@ -514,6 +851,14 @@ export function HomeScreen() {
             color={activeTab === "docs" ? HEADER_BLUE : "#64748b"}
           />
           <Text style={[styles.navLabel, activeTab === "docs" && styles.navLabelActive]}>Документы</Text>
+        </Pressable>
+        <Pressable style={styles.navItem} onPress={() => setActiveTab("deals")}>
+          <Ionicons
+            name="briefcase-outline"
+            size={22}
+            color={activeTab === "deals" ? HEADER_BLUE : "#64748b"}
+          />
+          <Text style={[styles.navLabel, activeTab === "deals" && styles.navLabelActive]}>Сделки</Text>
         </Pressable>
         <Pressable style={styles.navItem} onPress={() => setActiveTab("more")}>
           <Ionicons
@@ -524,16 +869,58 @@ export function HomeScreen() {
           <Text style={[styles.navLabel, activeTab === "more" && styles.navLabelActive]}>Ещё</Text>
         </Pressable>
       </View>
-      <View style={styles.fabWrap} pointerEvents="box-none">
-        <Pressable style={styles.fab} onPress={() => setBitrixVoiceOpen(true)} accessibilityRole="button">
-          <Ionicons name="mic" size={28} color="#fff" />
-        </Pressable>
-      </View>
     </>
   );
 
   const renderHomeDashboard = () => (
     <>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Bitrix24 — вход</Text>
+        {bitrixAuth.loading ? (
+          <ActivityIndicator color={HEADER_BLUE} />
+        ) : bitrixAuth.connected && bitrixAuth.session ? (
+          <>
+            <Text style={styles.muted}>
+              Вы вошли как {bitrixAuth.session.userName || `id ${bitrixAuth.session.bitrixUserId}`}.
+              Задачи ниже загружаются от вашего аккаунта.
+            </Text>
+            {bitrixAuth.session.taskScopeGranted === false ? (
+              <Text style={styles.errorText}>
+                Нет права «Задачи» у приложения. В Bitrix24 включите scope task в локальном
+                приложении, затем выйдите и войдите снова.
+              </Text>
+            ) : null}
+            <Pressable
+              onPress={() => void bitrixAuth.disconnect().then(() => refresh())}
+              style={[styles.button, styles.secondaryButton, styles.submitWide]}
+            >
+              <Text style={styles.buttonTextDark}>Выйти из Bitrix24</Text>
+            </Pressable>
+          </>
+        ) : (
+          <>
+            <Text style={styles.muted}>
+              Войдите в Bitrix24, чтобы видеть свои задачи (не только пользователя вебхука на
+              сервере).
+            </Text>
+            <Pressable
+              onPress={() => void bitrixAuth.connect().then(() => refresh())}
+              disabled={bitrixAuth.connecting}
+              style={[
+                styles.button,
+                styles.primaryButton,
+                styles.submitWide,
+                bitrixAuth.connecting && styles.buttonDisabled
+              ]}
+            >
+              <Text style={styles.buttonText}>
+                {bitrixAuth.connecting ? "Открываем Bitrix…" : "Войти в Bitrix24"}
+              </Text>
+            </Pressable>
+          </>
+        )}
+      </View>
+
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Запрос в Bitrix24</Text>
         <Text style={styles.muted}>
@@ -587,8 +974,11 @@ export function HomeScreen() {
             (submittingBitrix || !bitrixIntentText.trim()) && styles.buttonDisabled
           ]}
         >
-          <Text style={styles.buttonText}>{submittingBitrix ? "Отправка…" : "Отправить в Bitrix"}</Text>
+          <Text style={styles.buttonText}>
+            {submittingBitrix ? "Отправка…" : "Отправить в Bitrix"}
+          </Text>
         </Pressable>
+        {renderBitrixSubmitBanner()}
       </View>
 
       <View style={styles.card}>
@@ -599,8 +989,8 @@ export function HomeScreen() {
           </Pressable>
         </View>
         <Text style={styles.muted}>
-          Счётчики по задачам, где вы — ответственный (пользователь из URL вебхука на сервере). До{" "}
-          {80} шт. в выборке; точные итоги по порталу — после OAuth под вашим аккаунтом.
+          Счётчики по вашим задачам (ответственный = вы после OAuth, иначе пользователь вебхука).
+          До {80} шт. в выборке.
         </Text>
         {bitrixTaskStats ? (
           <View style={styles.bitrixStatsRow}>
@@ -621,49 +1011,64 @@ export function HomeScreen() {
               <Text style={styles.bitrixStatLabel}>Просрочено</Text>
             </Pressable>
           </View>
+        ) : bitrixTasksError ? (
+          <Text style={styles.muted}>{bitrixTasksError}</Text>
+        ) : bitrixAuth.connected ? (
+          <Text style={styles.muted}>
+            Задачи не найдены для вашего аккаунта Bitrix (ответственный / соисполнитель).
+          </Text>
         ) : (
           <Text style={styles.muted}>
-            Не удалось загрузить (проверьте BITRIX_WEBHOOK_URL: в пути должно быть …/rest/ID/токен/).
+            Войдите в Bitrix24 или настройте BITRIX_WEBHOOK_URL на сервере.
           </Text>
         )}
         {bitrixResponsibleId != null ? (
-          <Text style={styles.muted}>Ответственный в Bitrix, id: {bitrixResponsibleId}</Text>
+          <Text style={styles.muted}>
+            Bitrix user id: {bitrixResponsibleId}
+            {bitrixAuthMode ? ` · ${bitrixAuthMode}` : ""}
+          </Text>
         ) : null}
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Документы</Text>
-        <View style={styles.docGrid}>
-          <Pressable style={styles.docTile} onPress={() => openDocTile("Договоры")}>
-            <View style={styles.docIconWrap}>
-              <Ionicons name="document-text-outline" size={26} color={HEADER_BLUE} />
-            </View>
-            <Text style={styles.docTileLabel}>Договоры</Text>
-          </Pressable>
-          <Pressable style={styles.docTile} onPress={() => openDocTile("Сметы")}>
-            <View style={styles.docIconWrap}>
-              <Ionicons name="list-outline" size={26} color={HEADER_BLUE} />
-            </View>
-            <Text style={styles.docTileLabel}>Сметы</Text>
-          </Pressable>
-          <Pressable style={styles.docTile} onPress={() => openDocTile("Акты")}>
-            <View style={styles.docIconWrap}>
-              <Ionicons name="reader-outline" size={26} color={HEADER_BLUE} />
-            </View>
-            <Text style={styles.docTileLabel}>Акты</Text>
-          </Pressable>
-          <Pressable style={styles.docTile} onPress={() => openDocTile("Чертежи")}>
-            <View style={styles.docIconWrap}>
-              <Ionicons name="analytics-outline" size={26} color={HEADER_BLUE} />
-            </View>
-            <Text style={styles.docTileLabel}>Чертежи</Text>
-          </Pressable>
-        </View>
+        <Text style={styles.cardTitle}>Голос в Bitrix24</Text>
+        <Text style={styles.muted}>
+          Запишите команду голосом: смена этапа сделки, поиск по названию и другие действия в CRM.
+        </Text>
+        <Pressable style={styles.docTileWide} onPress={() => setBitrixVoiceOpen(true)}>
+          <View style={styles.docIconWrapWide}>
+            <Ionicons name="mic-outline" size={32} color={HEADER_BLUE} />
+          </View>
+          <Text style={styles.docTileLabelWide}>Записать команду</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Смета</Text>
+        <Text style={styles.muted}>
+          Запишите голосом все поля локальной сметы (форма № 4): стройка, основание, стоимость,
+          строки работ — всё, что произнесёте, попадёт в документ.
+        </Text>
+        <Pressable style={styles.docTileWide} onPress={openEstimateVoice}>
+          <View style={styles.docIconWrapWide}>
+            <Ionicons name="mic-outline" size={32} color={HEADER_BLUE} />
+          </View>
+          <Text style={styles.docTileLabelWide}>Записать смету голосом</Text>
+        </Pressable>
       </View>
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Свежая задача из Bitrix</Text>
-        <Pressable style={styles.notifRow} onPress={() => setActiveTab("tasks")}>
+        <Pressable
+          style={styles.notifRow}
+          onPress={() => {
+            if (bitrixTasks[0]?.id) {
+              openTaskDetail(bitrixTasks[0].id);
+            } else {
+              setActiveTab("tasks");
+            }
+          }}
+        >
           <Text style={styles.notifText}>{notificationPreview}</Text>
           <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
         </Pressable>
@@ -677,33 +1082,6 @@ export function HomeScreen() {
           </Pressable>
         </View>
       ) : null}
-
-      <View style={[styles.card, styles.cardMuted]}>
-        <Pressable
-          onPress={() => setDocVoiceSectionOpen((v) => !v)}
-          style={styles.collapseHeader}
-        >
-          <View style={{ flex: 1 }}>
-            <Text style={styles.cardTitle}>Голос → документ по шаблону</Text>
-            <Text style={styles.muted}>
-              Редкий сценарий: заявка на генерацию документа, не путать с запросом в Bitrix выше.
-            </Text>
-          </View>
-          <Ionicons
-            name={docVoiceSectionOpen ? "chevron-up" : "chevron-down"}
-            size={22}
-            color="#64748b"
-          />
-        </Pressable>
-        {docVoiceSectionOpen ? (
-          <Pressable
-            onPress={() => setDocVoiceOpen(true)}
-            style={[styles.button, styles.secondaryButton, { marginTop: 12 }]}
-          >
-            <Text style={styles.buttonTextDark}>Открыть форму записи</Text>
-          </Pressable>
-        ) : null}
-      </View>
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Сервер</Text>
@@ -723,8 +1101,8 @@ export function HomeScreen() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Задачи Bitrix24</Text>
         <Text style={styles.muted}>
-          Только задачи, где вы указаны ответственным (по пользователю из входящего вебхука). Счётчики
-          на главной считаются по этому же списку (ограничение выборки — см. лимит в API).
+          Список задач Bitrix24. Потяните экран вниз, чтобы обновить. Нажмите задачу — описание и
+          смена статуса.
         </Text>
         {bitrixTaskStats ? (
           <View style={styles.bitrixStatsRow}>
@@ -748,10 +1126,19 @@ export function HomeScreen() {
         ) : null}
         {loading ? <ActivityIndicator color={HEADER_BLUE} /> : null}
         {!loading && bitrixTasks.length === 0 ? (
-          <Text style={styles.muted}>Нет задач или не настроен / не разобран вебхук Bitrix.</Text>
+          <Text style={styles.muted}>
+            {bitrixTasksError ??
+              (bitrixAuth.connected
+                ? "Нет задач, где вы ответственный или соисполнитель."
+                : "Войдите в Bitrix24, чтобы видеть свои задачи.")}
+          </Text>
         ) : null}
         {bitrixTasks.map((task) => (
-          <View key={task.id} style={styles.listItem}>
+          <Pressable
+            key={task.id}
+            style={styles.listItem}
+            onPress={() => openTaskDetail(task.id)}
+          >
             <View style={styles.listHeader}>
               <Text style={styles.listTitle}>{task.title || "Без названия"}</Text>
               <Text style={styles.badge}>{bitrixTaskStatusRu(task.status)}</Text>
@@ -761,8 +1148,8 @@ export function HomeScreen() {
             ) : (
               <Text style={styles.muted}>Срок не указан</Text>
             )}
-            <Text style={styles.muted}>id: {task.id}</Text>
-          </View>
+            <Text style={styles.muted}>id: {task.id} · нажмите для подробностей</Text>
+          </Pressable>
         ))}
       </View>
 
@@ -782,6 +1169,52 @@ export function HomeScreen() {
             </Text>
             <Text style={styles.muted}>{formatDate(job.createdAt)}</Text>
           </View>
+        ))}
+      </View>
+    </>
+  );
+
+  const renderDealsTab = () => (
+    <>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Сделки Bitrix24</Text>
+        <Text style={styles.muted}>
+          Карточки сделок с текущим этапом воронки. Нажмите на сделку, чтобы сменить этап вручную.
+          {bitrixDealsAuthMode ? ` · источник: ${bitrixDealsAuthMode}` : ""}
+          {bitrixDeals.length > 0 ? ` · ${bitrixDeals.length} шт.` : ""}
+        </Text>
+        <TextInput
+          placeholder="Поиск по названию сделки"
+          placeholderTextColor="#94a3b8"
+          style={styles.input}
+          value={bitrixDealsSearch}
+          onChangeText={setBitrixDealsSearch}
+          returnKeyType="search"
+        />
+        {bitrixDealsError ? <Text style={styles.errorText}>{bitrixDealsError}</Text> : null}
+        {bitrixDealsLoading ? <ActivityIndicator color={HEADER_BLUE} /> : null}
+        {!bitrixDealsLoading && !bitrixDealsError && bitrixDeals.length === 0 ? (
+          <Text style={styles.muted}>
+            {bitrixAuth.connected
+              ? "Сделки не найдены. Проверьте права CRM в Bitrix или попробуйте другой запрос."
+              : "Войдите в Bitrix24, чтобы видеть сделки."}
+          </Text>
+        ) : null}
+        {bitrixDeals.filter((deal) => deal.id).map((deal) => (
+          <Pressable key={deal.id} style={styles.listItem} onPress={() => openDealDetail(deal.id)}>
+            <View style={styles.listHeader}>
+              <Text style={styles.listTitle}>{deal.title || "Без названия"}</Text>
+              <Text style={styles.badge}>{deal.stageLabel || deal.stageId || "—"}</Text>
+            </View>
+            {deal.opportunity ? (
+              <Text style={styles.muted}>
+                Сумма: {deal.opportunity} {deal.currencyId ?? ""}
+              </Text>
+            ) : null}
+            <Text style={styles.muted}>
+              id: {deal.id} · {formatDate(deal.dateModify ?? deal.dateCreate ?? null)}
+            </Text>
+          </Pressable>
         ))}
       </View>
     </>
@@ -960,55 +1393,26 @@ export function HomeScreen() {
           onChangeText={(v) => setBitrixHints((h) => ({ ...h, stageHint: v }))}
         />
         <Text style={styles.sectionLabel}>Запись</Text>
-        <View style={styles.row}>
-          {bitrixRecording ? (
-            <Pressable
-              onPress={() => void stopBitrixRecording()}
-              style={[styles.button, styles.secondaryButton, styles.submitWide]}
-            >
-              <Text style={styles.buttonTextDark}>Стоп</Text>
-            </Pressable>
-          ) : !bitrixAudioUri ? (
-            <Pressable
-              onPress={() => void startBitrixRecording()}
-              style={[styles.button, styles.primaryButton, styles.submitWide]}
-            >
-              <Text style={styles.buttonText}>Начать</Text>
-            </Pressable>
-          ) : (
-            <>
-              <Pressable
-                onPress={() => void togglePreviewPlayback(bitrixAudioUri)}
-                style={[styles.button, styles.secondaryButton]}
-              >
-                <Text style={styles.buttonTextDark}>
-                  {previewPlayingUri === bitrixAudioUri ? "Стоп" : "Прослушать"}
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => void resetBitrixRecordingDraft()}
-                style={[styles.button, styles.secondaryButton]}
-              >
-                <Text style={styles.buttonTextDark}>Перезаписать</Text>
-              </Pressable>
-            </>
+        <View style={styles.row} key={`bitrix-rec-${bitrixRecordingPhase}`}>
+          {renderRecordingControls(
+            bitrixRecordingPhase,
+            bitrixAudioUri,
+            () => void startBitrixRecording(),
+            () => void stopBitrixRecording(),
+            () => void resetBitrixRecordingDraft(),
+            () => void togglePreviewPlayback(bitrixAudioUri)
           )}
         </View>
-        <Text style={styles.muted}>
-          {bitrixRecording
-            ? "Идёт запись…"
-            : bitrixAudioUri
-              ? "Аудио готово."
-              : "Запись не сделана."}
-        </Text>
+        <Text style={styles.muted}>{recordingStatusText(bitrixRecordingPhase)}</Text>
         <Pressable
           onPress={() => void submitBitrixVoice()}
-          disabled={submittingBitrix || !bitrixAudioUri}
+          disabled={submittingBitrix || bitrixRecordingPhase !== "ready" || !bitrixAudioUri}
           style={[
             styles.button,
             styles.primaryButton,
             styles.submitWide,
-            (submittingBitrix || !bitrixAudioUri) && styles.buttonDisabled
+            (submittingBitrix || bitrixRecordingPhase !== "ready" || !bitrixAudioUri) &&
+              styles.buttonDisabled
           ]}
         >
           <Text style={styles.buttonText}>
@@ -1031,7 +1435,7 @@ export function HomeScreen() {
         >
           <Text style={styles.voiceClose}>Закрыть</Text>
         </Pressable>
-        <Text style={styles.voiceTitle}>Голосовая заявка</Text>
+        <Text style={styles.voiceTitle}>Смета голосом</Text>
         <View style={{ width: 56 }} />
       </View>
       <ScrollView
@@ -1041,83 +1445,41 @@ export function HomeScreen() {
         nestedScrollEnabled
       >
         <Text style={styles.muted}>
-          Выбери шаблон, запиши голос, заполни название и при необходимости текст — отправка на
-          backend.
+          Произнесите поля формы № 4: номер сметы, наименование стройки, основание, стоимость,
+          оплату труда, строки работ (шифр, наименование, единица, количество, цены). Сервер
+          распознает речь через Whisper и заполнит документ.
         </Text>
 
-        <Text style={styles.sectionLabel}>Шаблон</Text>
-        {loading ? <ActivityIndicator color={HEADER_BLUE} /> : null}
-        {!loading && templates.length === 0 ? (
+        {selectedTemplate ? (
+          <View style={[styles.templateCard, styles.templateCardSelected]}>
+            <Text style={styles.templateName}>{selectedTemplate.name}</Text>
+            <Text style={styles.templateMeta}>Категория: смета · {selectedTemplate.version}</Text>
+          </View>
+        ) : (
           <View style={styles.warnBox}>
             <Text style={styles.warnText}>
-              Нет шаблонов. Загрузите шаблон в админке (:5173), затем «Обновить» на главной.
+              Шаблон сметы не найден на сервере. Перезапустите backend или загрузите шаблон в
+              админке.
             </Text>
           </View>
-        ) : null}
-        {templates.map((template) => {
-          const selected = template.id === requestForm.templateId;
-          return (
-            <Pressable
-              key={template.id}
-              onPress={() =>
-                setRequestForm((current) => ({ ...current, templateId: template.id }))
-              }
-              style={[styles.templateCard, selected && styles.templateCardSelected]}
-            >
-              <Text style={styles.templateName}>{template.name}</Text>
-              <Text style={styles.templateMeta}>
-                {template.category} · {template.version}
-              </Text>
-            </Pressable>
-          );
-        })}
+        )}
 
         <Text style={styles.sectionLabel}>Запись</Text>
-        <View style={styles.row}>
-          {docRecording ? (
-            <Pressable
-              onPress={() => void stopDocRecording()}
-              style={[styles.button, styles.secondaryButton, styles.submitWide]}
-            >
-              <Text style={styles.buttonTextDark}>Стоп</Text>
-            </Pressable>
-          ) : !docAudioUri ? (
-            <Pressable
-              onPress={() => void startDocRecording()}
-              style={[styles.button, styles.primaryButton, styles.submitWide]}
-            >
-              <Text style={styles.buttonText}>Начать</Text>
-            </Pressable>
-          ) : (
-            <>
-              <Pressable
-                onPress={() => void togglePreviewPlayback(docAudioUri)}
-                style={[styles.button, styles.secondaryButton]}
-              >
-                <Text style={styles.buttonTextDark}>
-                  {previewPlayingUri === docAudioUri ? "Стоп" : "Прослушать"}
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => void resetDocRecordingDraft()}
-                style={[styles.button, styles.secondaryButton]}
-              >
-                <Text style={styles.buttonTextDark}>Перезаписать</Text>
-              </Pressable>
-            </>
+        <View style={styles.row} key={`doc-rec-${docRecordingPhase}`}>
+          {renderRecordingControls(
+            docRecordingPhase,
+            docAudioUri,
+            () => void startDocRecording(),
+            () => void stopDocRecording(),
+            () => void resetDocRecordingDraft(),
+            () => void togglePreviewPlayback(docAudioUri)
           )}
         </View>
-        <Text style={styles.muted}>
-          {docRecording
-            ? "Идёт запись…"
-            : docAudioUri
-              ? "Аудио готово."
-              : "Запись не сделана."}
-        </Text>
+        <Text style={styles.muted}>{recordingStatusText(docRecordingPhase)}</Text>
 
-        <Text style={styles.sectionLabel}>Данные заявки</Text>
+        <Text style={styles.sectionLabel}>Название (необязательно)</Text>
         <TextInput
-          placeholder="Название / источник *"
+          placeholder="Например: Смета на кровлю — ЖК Север"
           placeholderTextColor="#94a3b8"
           style={styles.input}
           value={requestForm.sourceName}
@@ -1126,7 +1488,7 @@ export function HomeScreen() {
           }
         />
         <TextInput
-          placeholder="Заметки (текст вручную)"
+          placeholder="Дополнение текстом (если что-то не сказали вслух)"
           placeholderTextColor="#94a3b8"
           style={[styles.input, styles.textArea]}
           multiline
@@ -1135,93 +1497,28 @@ export function HomeScreen() {
             setRequestForm((current) => ({ ...current, payload: value }))
           }
         />
-        <Text style={styles.sectionLabel}>Канал доставки</Text>
-        <View style={styles.segmentRow}>
-          {(["internal", "email", "bitrix"] as const).map((option) => (
-            <Pressable
-              key={option}
-              onPress={() =>
-                setRequestForm((current) => ({ ...current, deliveryChannel: option }))
-              }
-              style={[
-                styles.segment,
-                requestForm.deliveryChannel === option && styles.segmentSelected
-              ]}
-            >
-              <Text
-                style={
-                  requestForm.deliveryChannel === option
-                    ? styles.segmentTextSelected
-                    : styles.segmentText
-                }
-              >
-                {option}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-        <TextInput
-          placeholder="Адрес доставки"
-          placeholderTextColor="#94a3b8"
-          style={styles.input}
-          value={requestForm.deliveryAddress}
-          onChangeText={(value) =>
-            setRequestForm((current) => ({ ...current, deliveryAddress: value }))
-          }
-        />
-        <TextInput
-          placeholder="Команда задачи (необязательно)"
-          placeholderTextColor="#94a3b8"
-          style={[styles.input, styles.textArea]}
-          multiline
-          value={requestForm.taskCommandText}
-          onChangeText={(value) =>
-            setRequestForm((current) => ({ ...current, taskCommandText: value }))
-          }
-        />
-        <Text style={styles.sectionLabel}>Цель команды</Text>
-        <View style={styles.segmentRow}>
-          {(["bitrix24", "email_approval"] as const).map((option) => (
-            <Pressable
-              key={option}
-              onPress={() =>
-                setRequestForm((current) => ({ ...current, taskTarget: option }))
-              }
-              style={[
-                styles.segment,
-                requestForm.taskTarget === option && styles.segmentSelected
-              ]}
-            >
-              <Text
-                style={
-                  requestForm.taskTarget === option
-                    ? styles.segmentTextSelected
-                    : styles.segmentText
-                }
-              >
-                {option}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
 
         <Pressable
           onPress={() => void submitVoiceRequest()}
           disabled={
             submittingRequest ||
+            docRecordingPhase !== "ready" ||
             !docAudioUri ||
-            !selectedTemplate ||
-            requestForm.sourceName.trim() === ""
+            !selectedTemplate
           }
           style={[
             styles.button,
             styles.primaryButton,
             styles.submitWide,
-            (submittingRequest || !docAudioUri || !selectedTemplate) && styles.buttonDisabled
+            (submittingRequest ||
+              docRecordingPhase !== "ready" ||
+              !docAudioUri ||
+              !selectedTemplate) &&
+              styles.buttonDisabled
           ]}
         >
           <Text style={styles.buttonText}>
-            {submittingRequest ? "Отправка…" : "Отправить заявку"}
+            {submittingRequest ? "Отправка…" : "Сформировать смету"}
           </Text>
         </Pressable>
       </ScrollView>
@@ -1233,6 +1530,7 @@ export function HomeScreen() {
       <View style={styles.root}>
         <ExpoStatusBar style="dark" />
         {renderBitrixVoiceFullScreen()}
+        {renderSubmitOverlay()}
       </View>
     );
   }
@@ -1242,6 +1540,7 @@ export function HomeScreen() {
       <View style={styles.root}>
         <ExpoStatusBar style="dark" />
         {renderVoiceFullScreen()}
+        {renderSubmitOverlay()}
       </View>
     );
   }
@@ -1261,14 +1560,52 @@ export function HomeScreen() {
         contentContainerStyle={styles.mainScrollContent}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void refresh({ pull: true })}
+            tintColor={HEADER_BLUE}
+            colors={[HEADER_BLUE]}
+          />
+        }
       >
         {activeTab === "home" ? renderHomeDashboard() : null}
         {activeTab === "tasks" ? renderTasksTab() : null}
+        {activeTab === "deals" ? renderDealsTab() : null}
         {activeTab === "docs" ? renderDocsTab() : null}
         {activeTab === "more" ? renderMoreTab() : null}
       </ScrollView>
 
       {renderBottomNav()}
+      <View
+        style={[
+          styles.fabWrap,
+          { bottom: Platform.OS === "android" ? 76 : 90 }
+        ]}
+        pointerEvents="box-none"
+      >
+        <Pressable
+          style={styles.fab}
+          onPress={() => setBitrixVoiceOpen(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Голосовая команда в Bitrix24"
+        >
+          <Ionicons name="mic" size={26} color="#fff" />
+        </Pressable>
+      </View>
+      {renderSubmitOverlay()}
+      <BitrixTaskDetailModal
+        taskId={selectedTaskId}
+        visible={selectedTaskId != null}
+        onClose={closeTaskDetail}
+        onUpdated={() => void refresh({ pull: true })}
+      />
+      <BitrixDealDetailModal
+        dealId={selectedDealId}
+        visible={selectedDealId != null}
+        onClose={closeDealDetail}
+        onUpdated={() => void loadBitrixDeals(bitrixDealsSearch, true)}
+      />
     </View>
   );
 }
@@ -1299,7 +1636,7 @@ const styles = StyleSheet.create({
   mainScrollContent: {
     gap: 14,
     padding: 16,
-    paddingBottom: 100
+    paddingBottom: 110
   },
   card: {
     backgroundColor: "#fff",
@@ -1357,31 +1694,23 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginRight: 4
   },
-  docGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-    justifyContent: "space-between",
-    marginTop: 4
-  },
-  docTile: {
+  docTileWide: {
     alignItems: "center",
-    flexBasis: "23%",
-    maxWidth: "24%"
+    marginTop: 8
   },
-  docIconWrap: {
+  docIconWrapWide: {
     alignItems: "center",
     backgroundColor: "#eff6ff",
-    borderRadius: 14,
-    height: 56,
+    borderRadius: 16,
+    height: 72,
     justifyContent: "center",
-    marginBottom: 6,
+    marginBottom: 8,
     width: "100%"
   },
-  docTileLabel: {
+  docTileLabelWide: {
     color: "#334155",
-    fontSize: 11,
-    fontWeight: "600",
+    fontSize: 15,
+    fontWeight: "700",
     textAlign: "center"
   },
   notifRow: {
@@ -1477,38 +1806,34 @@ const styles = StyleSheet.create({
     alignItems: "center",
     flex: 1,
     gap: 2,
+    minWidth: 0,
     paddingVertical: 4
-  },
-  navSpacer: {
-    width: 56
   },
   navLabel: {
     color: "#64748b",
-    fontSize: 10,
-    fontWeight: "600"
+    fontSize: 9,
+    fontWeight: "600",
+    textAlign: "center"
   },
   navLabelActive: {
     color: HEADER_BLUE
   },
   fabWrap: {
-    alignItems: "center",
-    bottom: 28,
-    left: 0,
     pointerEvents: "box-none",
     position: "absolute",
-    right: 0,
-    zIndex: 20
+    right: 16,
+    zIndex: 30
   },
   fab: {
     alignItems: "center",
     backgroundColor: HEADER_BLUE,
-    borderRadius: 32,
-    elevation: 6,
+    borderRadius: 28,
+    elevation: 8,
     height: 56,
     justifyContent: "center",
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.25,
     shadowRadius: 6,
     width: 56
   },
@@ -1760,6 +2085,64 @@ const styles = StyleSheet.create({
   logError: {
     color: "#b91c1c",
     fontSize: 12,
+    fontWeight: "600"
+  },
+  progressOverlay: {
+    alignItems: "center",
+    backgroundColor: "rgba(15, 23, 42, 0.55)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 24
+  },
+  progressCard: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    gap: 10,
+    maxWidth: 340,
+    padding: 24,
+    width: "100%"
+  },
+  progressTitle: {
+    color: "#0f172a",
+    fontSize: 18,
+    fontWeight: "700",
+    textAlign: "center"
+  },
+  progressStep: {
+    color: HEADER_BLUE,
+    fontSize: 13,
+    fontWeight: "700"
+  },
+  progressMessage: {
+    color: "#334155",
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center"
+  },
+  progressElapsed: {
+    color: "#64748b",
+    fontSize: 13
+  },
+  progressHint: {
+    color: "#64748b",
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: "center"
+  },
+  inlineProgress: {
+    alignItems: "center",
+    backgroundColor: "#eff6ff",
+    borderRadius: 12,
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 4,
+    padding: 12
+  },
+  inlineProgressText: {
+    color: "#1e40af",
+    flex: 1,
+    fontSize: 14,
     fontWeight: "600"
   }
 });

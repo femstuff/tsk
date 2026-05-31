@@ -23,8 +23,9 @@ type Collector struct {
 	httpRequests         *prometheus.CounterVec
 	businessRequests     *prometheus.CounterVec
 	jobStatusGauge       *prometheus.GaugeVec
-	jobProcessingLatency *prometheus.HistogramVec
-	jobCreated           prometheus.Counter
+		jobProcessingLatency *prometheus.HistogramVec
+		httpRequestDuration  *prometheus.HistogramVec
+		jobCreated           prometheus.Counter
 	errors               *prometheus.CounterVec
 	uptime               prometheus.GaugeFunc
 }
@@ -50,6 +51,11 @@ func NewCollector() *Collector {
 			Help:    "Processing duration of document jobs.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10},
 		}, []string{"status"}),
+		httpRequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "tsk_http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds.",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
+		}, []string{"method", "path"}),
 		jobCreated: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "tsk_document_jobs_created_total",
 			Help: "Total number of document jobs created.",
@@ -72,6 +78,7 @@ func NewCollector() *Collector {
 		collector.businessRequests,
 		collector.jobStatusGauge,
 		collector.jobProcessingLatency,
+		collector.httpRequestDuration,
 		collector.jobCreated,
 		collector.errors,
 		collector.uptime,
@@ -97,12 +104,11 @@ func (c *Collector) RecordHTTPRequest(method string, path string, status int, du
 		c.totalBusinessRequests.Add(1)
 		c.businessRequests.WithLabelValues(method, path, strconv.Itoa(status)).Inc()
 	}
+	c.httpRequestDuration.WithLabelValues(method, path).Observe(duration.Seconds())
 
 	if status >= http.StatusInternalServerError {
 		c.RecordError("http")
 	}
-
-	_ = duration
 }
 
 func (c *Collector) RecordJobCreated() {

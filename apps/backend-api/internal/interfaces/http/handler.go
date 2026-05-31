@@ -14,20 +14,26 @@ import (
 	domain "tsk/backend-api/internal/domain/documentjob"
 	"tsk/backend-api/internal/infrastructure/config"
 	"tsk/backend-api/internal/infrastructure/metrics"
+	prom "tsk/backend-api/internal/infrastructure/prometheus"
+	"tsk/backend-api/internal/integrations/bitrixoauth"
 	"tsk/backend-api/pkg/httpx"
 )
 
 type Handler struct {
-	service *app.Service
-	config  config.Config
-	metrics *metrics.Collector
+	service     *app.Service
+	config      config.Config
+	metrics     *metrics.Collector
+	prometheus  *prom.Client
+	healthDeps  HealthDeps
 }
 
-func NewHandler(service *app.Service, cfg config.Config, metrics *metrics.Collector) *Handler {
+func NewHandler(service *app.Service, cfg config.Config, metrics *metrics.Collector, prometheusClient *prom.Client, healthDeps HealthDeps) *Handler {
 	return &Handler{
-		service: service,
-		config:  cfg,
-		metrics: metrics,
+		service:    service,
+		config:     cfg,
+		metrics:    metrics,
+		prometheus: prometheusClient,
+		healthDeps: healthDeps,
 	}
 }
 
@@ -45,30 +51,54 @@ func (h *Handler) Root(w http.ResponseWriter, r *http.Request) {
 			"mobileVoiceRequest":     "/api/v1/mobile/voice-requests",
 			"mobileBitrixIntent":     "POST /api/v1/mobile/bitrix-intent",
 			"mobileBitrixTasks":      "GET /api/v1/mobile/bitrix-tasks",
+			"mobileBitrixDeals":      "GET /api/v1/mobile/bitrix-deals",
+			"mobileBitrixDeal":       "GET /api/v1/mobile/bitrix-deals/{id}",
+			"mobileBitrixDealStage":  "PATCH /api/v1/mobile/bitrix-deals/{id}/stage",
 			"sourceDocuments":        "/api/v1/source-documents",
 			"sourceDocumentDownload": "/api/v1/source-documents/{id}/download",
 			"generatedDocuments":     "/api/v1/generated-documents",
 			"documentDownload":       "/api/v1/generated-documents/{id}/download",
 			"taskCommands":           "/api/v1/task-commands",
 			"processingEvents":       "/api/v1/processing-events",
+			"appSettings":            "/api/v1/app-settings",
 			"adminVoiceBitrix":       "POST /api/v1/admin/voice-bitrix-pipeline",
 			"metrics":                "/metrics",
 		},
 	})
 }
 
-func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":              "ok",
-		"service":             h.config.ServiceName,
-		"environment":         h.config.Environment,
-		"database":            "configured",
-		"storageRoot":         h.config.StorageRoot,
-		"uptimeSeconds":       h.metrics.Uptime().Seconds(),
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	checks := h.healthDeps.Check(r.Context())
+	statusCode := http.StatusOK
+	overall := "ok"
+	if !h.healthDeps.IsHealthy(checks) {
+		statusCode = http.StatusServiceUnavailable
+		overall = "degraded"
+	}
+
+	httpx.WriteJSON(w, statusCode, map[string]any{
+		"status":               overall,
+		"service":              h.config.ServiceName,
+		"environment":          h.config.Environment,
+		"checks":               checks,
+		"storageRoot":          h.config.StorageRoot,
+		"uptimeSeconds":        h.metrics.Uptime().Seconds(),
 		"productRequestsTotal": h.metrics.BusinessRequests(),
 		"httpRequestsTotalRaw": h.metrics.Requests(),
-		"jobsCreatedTotal":    h.metrics.JobsCreated(),
-		"errorsTotal":         h.metrics.Errors(),
+		"jobsCreatedTotal":     h.metrics.JobsCreated(),
+		"errorsTotal":          h.metrics.Errors(),
+	})
+}
+
+func (h *Handler) ListAppSettings(w http.ResponseWriter, r *http.Request) {
+	items, err := h.service.ListPublicAppSettings(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"items": items,
 	})
 }
 
@@ -325,7 +355,7 @@ func (h *Handler) ListMobileBitrixTasks(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	bundle, err := h.service.ListBitrixTasksForMobile(r.Context(), limit, responsibleOverride)
+	bundle, err := h.service.ListBitrixTasksForMobile(r.Context(), limit, responsibleOverride, r.Header.Get(app.BitrixSessionHeaderName()), parseRefreshQuery(r))
 	if err != nil {
 		h.writeDomainError(w, err)
 		return
@@ -335,7 +365,185 @@ func (h *Handler) ListMobileBitrixTasks(w http.ResponseWriter, r *http.Request) 
 		"responsibleUserId": bundle.ResponsibleUserID,
 		"stats":             bundle.Stats,
 		"items":             bundle.Items,
+		"authMode":          bundle.AuthMode,
 	})
+}
+
+func (h *Handler) GetMobileBitrixTask(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimSpace(r.PathValue("id"))
+	if taskID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "task id is required")
+		return
+	}
+
+	detail, err := h.service.GetBitrixTaskForMobile(r.Context(), taskID, r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": detail})
+}
+
+func (h *Handler) UpdateMobileBitrixTaskStatus(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimSpace(r.PathValue("id"))
+	if taskID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "task id is required")
+		return
+	}
+
+	var body struct {
+		Status int `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	if body.Status <= 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "status is required")
+		return
+	}
+
+	detail, err := h.service.UpdateBitrixTaskStatusForMobile(r.Context(), taskID, body.Status, r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": detail})
+}
+
+func (h *Handler) ListMobileBitrixDeals(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+
+	bundle, err := h.service.ListBitrixDealsForMobile(r.Context(), limit, search, r.Header.Get(app.BitrixSessionHeaderName()), parseRefreshQuery(r))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"items":    bundle.Items,
+		"authMode": bundle.AuthMode,
+	})
+}
+
+func (h *Handler) GetMobileBitrixDeal(w http.ResponseWriter, r *http.Request) {
+	dealID := strings.TrimSpace(r.PathValue("id"))
+	if dealID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "deal id is required")
+		return
+	}
+
+	detail, err := h.service.GetBitrixDealForMobile(r.Context(), dealID, r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": detail})
+}
+
+func (h *Handler) UpdateMobileBitrixDealStage(w http.ResponseWriter, r *http.Request) {
+	dealID := strings.TrimSpace(r.PathValue("id"))
+	if dealID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "deal id is required")
+		return
+	}
+
+	var body struct {
+		StageID string `json:"stageId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	if strings.TrimSpace(body.StageID) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "stageId is required")
+		return
+	}
+
+	detail, err := h.service.UpdateBitrixDealStageForMobile(r.Context(), dealID, body.StageID, r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": detail})
+}
+
+func parseRefreshQuery(r *http.Request) bool {
+	value := strings.TrimSpace(r.URL.Query().Get("refresh"))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+func (h *Handler) StartMobileBitrixOAuth(w http.ResponseWriter, r *http.Request) {
+	result, err := h.service.StartBitrixOAuth(r.Context())
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": result})
+}
+
+func (h *Handler) MobileBitrixOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	state := strings.TrimSpace(r.URL.Query().Get("state"))
+	if code == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "missing code")
+		return
+	}
+
+	view, err := h.service.CompleteBitrixOAuthCallback(
+		r.Context(),
+		code,
+		state,
+		strings.TrimSpace(r.URL.Query().Get("domain")),
+		strings.TrimSpace(r.URL.Query().Get("scope")),
+	)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	scheme := h.config.BitrixMobileAppScheme
+	if scheme == "" {
+		scheme = "tsk"
+	}
+	redirectURL := bitrixoauth.MobileRedirectURL(scheme, view.SessionID)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+func (h *Handler) GetMobileBitrixOAuthSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.Header.Get(app.BitrixSessionHeaderName()))
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(r.URL.Query().Get("sessionId"))
+	}
+	view, err := h.service.GetBitrixOAuthSession(r.Context(), sessionID)
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": view})
+}
+
+func (h *Handler) DeleteMobileBitrixOAuthSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.Header.Get(app.BitrixSessionHeaderName()))
+	if sessionID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "session header is required")
+		return
+	}
+	if err := h.service.RevokeBitrixOAuthSession(r.Context(), sessionID); err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) CreateMobileBitrixIntent(w http.ResponseWriter, r *http.Request) {

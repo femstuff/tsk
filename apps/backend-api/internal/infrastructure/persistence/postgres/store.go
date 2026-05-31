@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -336,13 +337,18 @@ func (s *Store) GetSourceDocumentByID(ctx context.Context, id string) (domain.So
 }
 
 func (s *Store) CreateSourceDocument(ctx context.Context, params domain.SourceDocumentCreateParams) (domain.SourceDocument, error) {
+	var templateID any
+	if strings.TrimSpace(params.TemplateID) != "" {
+		templateID = params.TemplateID
+	}
+
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO source_documents (
 			id, job_id, template_id, kind, origin, file_name, mime_type, storage_key, size_bytes, created_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, job_id, template_id, kind, origin, file_name, mime_type, storage_key, size_bytes, created_at
-	`, params.ID, params.JobID, params.TemplateID, params.Kind, params.Origin, params.FileName, params.MimeType, params.StorageKey, params.SizeBytes, params.CreatedAt)
+	`, params.ID, params.JobID, templateID, params.Kind, params.Origin, params.FileName, params.MimeType, params.StorageKey, params.SizeBytes, params.CreatedAt)
 
 	return scanSourceDocument(row)
 }
@@ -418,6 +424,24 @@ func (s *Store) CreateProcessingEvent(ctx context.Context, params domain.Process
 	`, params.ID, params.JobID, params.Level, params.EventType, params.Message, params.Details, params.CreatedAt)
 
 	return scanProcessingEvent(row)
+}
+
+func (s *Store) CountVoiceEventsSince(ctx context.Context, since time.Time) (int, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM processing_events
+		WHERE created_at >= $1
+		  AND (
+		    event_type LIKE 'voice.%'
+		    OR event_type LIKE 'mobile.bitrix_intent.%'
+		    OR (event_type = 'source_document.uploaded' AND message ILIKE '%голос%')
+		  )
+	`, since)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) ListTaskCommands(ctx context.Context, jobID string) ([]domain.TaskCommand, error) {
@@ -602,10 +626,11 @@ func scanSourceDocument(row interface {
 }) (domain.SourceDocument, error) {
 	var document domain.SourceDocument
 	var jobID *string
+	var templateID *string
 	err := row.Scan(
 		&document.ID,
 		&jobID,
-		&document.TemplateID,
+		&templateID,
 		&document.Kind,
 		&document.Origin,
 		&document.FileName,
@@ -615,6 +640,9 @@ func scanSourceDocument(row interface {
 		&document.CreatedAt,
 	)
 	document.JobID = jobID
+	if templateID != nil {
+		document.TemplateID = *templateID
+	}
 	return document, err
 }
 

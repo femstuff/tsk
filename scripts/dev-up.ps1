@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$DefaultServices = @("postgres", "backend-api", "admin-web", "prometheus", "grafana")
+$DefaultServices = @("postgres", "redis", "backend-api", "admin-web", "prometheus", "grafana")
 
 function Invoke-DockerCommand {
     param(
@@ -56,6 +56,7 @@ try {
     Write-Host ""
     Write-Host "Local services are available at:" -ForegroundColor Green
     Write-Host "  PostgreSQL: postgres://tsk:tsk@localhost:5432/tsk"
+    Write-Host "  Redis:      redis://localhost:6379/0"
     Write-Host "  API:        http://localhost:8080"
     Write-Host "  Admin web:  http://localhost:5173"
     Write-Host "  Prometheus: http://localhost:9090"

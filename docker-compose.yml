@@ -18,6 +18,19 @@
       - postgres-data:/var/lib/postgresql/data
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: tsk-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
   backend-api:
     build:
       context: ./apps/backend-api
@@ -25,16 +38,25 @@
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       # whisper-api не в depends_on: иначе любой up backend тянет тяжёлый образ/старт Whisper.
       # Для голоса: поднимите whisper отдельно — `docker compose up -d whisper-api` и дождитесь health.
     environment:
       APP_ENV: local
       APP_PORT: 8080
       DATABASE_URL: postgres://tsk:tsk@postgres:5432/tsk?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
       STORAGE_ROOT: /var/lib/tsk/storage
       APPROVAL_EMAIL: ops@example.local
       # Задайте в файле `.env` в корне репозитория: BITRIX_WEBHOOK_URL=https://...bitrix24.ru/rest/1/.../
       BITRIX_WEBHOOK_URL: ${BITRIX_WEBHOOK_URL:-}
+      BITRIX_OAUTH_CLIENT_ID: ${BITRIX_OAUTH_CLIENT_ID:-}
+      BITRIX_OAUTH_CLIENT_SECRET: ${BITRIX_OAUTH_CLIENT_SECRET:-}
+      BITRIX_PORTAL_DOMAIN: ${BITRIX_PORTAL_DOMAIN:-}
+      BITRIX_OAUTH_REDIRECT_URI: ${BITRIX_OAUTH_REDIRECT_URI:-}
+      BITRIX_MOBILE_APP_SCHEME: ${BITRIX_MOBILE_APP_SCHEME:-tsk}
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
       WHISPER_BASE_URL: http://whisper-api:8000
     ports:
       - "8080:8080"

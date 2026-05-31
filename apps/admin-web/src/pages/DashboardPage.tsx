@@ -1,7 +1,26 @@
 import { useMemo, useState, type FormEvent } from "react";
 
+import { DashboardPageView } from "./DashboardPageView";
+import { useAdminDashboard } from "../features/admin/useAdminDashboard";
 import { useDashboardData } from "../features/dashboard/useDashboardData";
+import { useObservabilityMetrics } from "../features/observability/useObservabilityMetrics";
 import type { AdminVoiceBitrixResult } from "../entities/document-job/types";
+import {
+  buildDocumentsTrend,
+  buildJobStatusDonut,
+  bitrixTaskDonut,
+  countWithinDays,
+  deriveMetrics,
+  deriveSystemLoad,
+  type NavSection
+} from "../lib/dashboardAnalytics";
+import {
+  formatPrometheusMetrics,
+  formatUptime,
+  prometheusHttpSeries,
+  prometheusJobDonut,
+  prometheusSystemLoad
+} from "../lib/observabilityFormat";
 import { getApiBaseUrl, runAdminVoiceBitrixPipeline } from "../shared/api/client";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -83,7 +102,8 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   "voice.bitrix_deal_moved": "Сделка в Bitrix обновлена",
   "voice.bitrix_no_action": "Действие Bitrix не распознано",
   "mobile.bitrix_intent.ok": "Мобильное приложение: Bitrix (успех)",
-  "mobile.bitrix_intent.error": "Мобильное приложение: Bitrix (ошибка)"
+  "mobile.bitrix_intent.error": "Мобильное приложение: Bitrix (ошибка)",
+  "bitrix.oauth.connected": "Авторизация Bitrix24"
 };
 
 const VOICE_ACTION_LABELS: Record<string, string> = {
@@ -146,6 +166,8 @@ const HEALTH_STATUS_LABELS: Record<string, string> = {
   ok: "Доступен",
   loading: "Загрузка"
 };
+
+const EVENTS_PAGE_SIZE = 5;
 
 function translateFromMap(value: string, labels: Record<string, string>) {
   return labels[value] ?? value;
@@ -260,6 +282,15 @@ export function DashboardPage() {
     changeJobStatus,
     summary
   } = useDashboardData();
+  const {
+    snapshot: observability,
+    error: observabilityError
+  } = useObservabilityMetrics();
+  const {
+    dashboard: adminDashboard,
+    loading: adminDashboardLoading,
+    error: adminDashboardError
+  } = useAdminDashboard();
 
   const [templateForm, setTemplateForm] = useState({
     name: "",
@@ -289,14 +320,93 @@ export function DashboardPage() {
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceResult, setVoiceResult] = useState<AdminVoiceBitrixResult | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [eventsPage, setEventsPage] = useState(0);
+  const [activeSection, setActiveSection] = useState<NavSection>("dashboard");
 
   const apiBaseUrl = getApiBaseUrl();
+
+  const documentsTrend = useMemo(() => buildDocumentsTrend(jobs), [jobs]);
+  const fallbackJobDonut = useMemo(() => buildJobStatusDonut(jobs), [jobs]);
+  const prometheusDonut = useMemo(() => prometheusJobDonut(observability), [observability]);
+  const bitrixDonut = useMemo(
+    () => (adminDashboard ? bitrixTaskDonut(adminDashboard.bitrixTasks) : []),
+    [adminDashboard]
+  );
+  const jobStatusDonut =
+    bitrixDonut.length > 0 ? bitrixDonut : prometheusDonut.length > 0 ? prometheusDonut : fallbackJobDonut;
+  const dashboardMetrics = useMemo(
+    () =>
+      observability?.available
+        ? formatPrometheusMetrics(observability)
+        : deriveMetrics(health),
+    [health, observability]
+  );
+  const httpRateSeries = useMemo(() => prometheusHttpSeries(observability), [observability]);
+  const prometheusLoad = useMemo(() => prometheusSystemLoad(observability), [observability]);
+  const systemLoad = useMemo(() => {
+    const healthUptime = health?.uptimeSeconds ?? 0;
+    const promUptime = observability?.uptimeSeconds ?? 0;
+    const uptimeSeconds = Math.max(healthUptime, promUptime);
+
+    if (prometheusLoad) {
+      return {
+        cpu: prometheusLoad.cpu,
+        memory: prometheusLoad.memory,
+        memoryLabel: prometheusLoad.memoryGb,
+        uptimeLabel: formatUptime(uptimeSeconds)
+      };
+    }
+    return {
+      cpu: deriveSystemLoad(summary).cpu,
+      memory: deriveSystemLoad(summary).memory,
+      memoryLabel: "—",
+      uptimeLabel: formatUptime(uptimeSeconds)
+    };
+  }, [health?.uptimeSeconds, observability?.uptimeSeconds, prometheusLoad, summary]);
+  const metricsSource = observability?.available ? "Prometheus · live" : "Health endpoint";
+  const formatAuthTime = (value: string) => formatDate(value);
+
+  const integrations = useMemo(() => {
+    const bitrixActive =
+      taskCommands.some((command) => command.integrationMode === "webhook") ||
+      events.some((event) => event.eventType.includes("bitrix"));
+
+    return [
+      {
+        name: "Bitrix24",
+        status: bitrixActive ? "Подключено" : "Не настроено",
+        tone: bitrixActive ? ("ok" as const) : ("warn" as const)
+      },
+      {
+        name: "Prometheus",
+        status: observability?.available ? "Подключено" : "Нет данных",
+        tone: observability?.available ? ("ok" as const) : ("warn" as const)
+      },
+      {
+        name: "Grafana",
+        status: observability?.available ? "Подключено" : "Нет данных Prometheus",
+        tone: observability?.available ? ("ok" as const) : ("warn" as const)
+      },
+      {
+        name: "Go API",
+        status: health?.status === "ok" ? "Работает" : "Проверка",
+        tone: health?.status === "ok" ? ("ok" as const) : ("warn" as const)
+      }
+    ];
+  }, [events, health?.status, observability?.available, taskCommands]);
 
   const readyToSubmitTemplate = templateForm.name.trim() !== "" && templateFile !== null;
   const readyToSubmitJob =
     jobForm.templateId.trim() !== "" && jobForm.sourceName.trim() !== "";
 
   const templateOptions = useMemo(() => templates, [templates]);
+
+  const eventsPageCount = Math.max(1, Math.ceil(events.length / EVENTS_PAGE_SIZE));
+  const safeEventsPage = Math.min(eventsPage, eventsPageCount - 1);
+  const visibleEvents = useMemo(() => {
+    const start = safeEventsPage * EVENTS_PAGE_SIZE;
+    return events.slice(start, start + EVENTS_PAGE_SIZE);
+  }, [events, safeEventsPage]);
 
   const handleTemplateSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -314,7 +424,7 @@ export function DashboardPage() {
     await submitTemplate(formData);
     setTemplateForm({
       name: "",
-      category: "Операции",
+      category: "estimate",
       version: "v1",
       description: ""
     });
@@ -376,602 +486,106 @@ export function DashboardPage() {
   };
 
   return (
-    <main className="page-shell">
-      <section className="hero">
-        <div>
-          <p className="eyebrow">Админ-панель TSK</p>
-          <h1>Управление шаблонами, заявками, документами и журналом событий</h1>
-          <p className="hero-copy">
-            Панель работает с постоянным хранилищем шаблонов, заявками в Postgres,
-            сформированными документами и операционным журналом обработки.
-          </p>
-        </div>
-
-        <div className="hero-actions">
-          <button onClick={() => void refresh()} disabled={loading}>
-            Обновить
-          </button>
-        </div>
-      </section>
-
-      {error ? <p className="banner error">{error}</p> : null}
-
-      <section className="card voice-pipeline-card">
-        <h2>Голос → Whisper → Bitrix (тест из админки)</h2>
-        <p className="muted">
-          Загрузите аудио (m4a, ogg, wav и т.д.). Backend отправит файл в Python-сервис{" "}
-          <code>/transcribe</code>, сохранит транскрипт в заявке и попытается выполнить действие в
-          Bitrix24, если в корне проекта в файле <code>.env</code> задан{" "}
-          <code>BITRIX_WEBHOOK_URL</code> (входящий вебхук REST). Примеры: «сделка 123 следующий
-          этап», «сделку «ТЕСТОВЫЙ ПРОЕКТ» следующий этап», «создай задачу: позвонить клиенту».
-          Шаблон и название источника можно не указывать (подставится первый шаблон и подпись по
-          умолчанию). Поля «какую сделку» и «куда» — текстовые подсказки к парсеру, необязательны.
-        </p>
-        {voiceError ? <p className="banner error">{voiceError}</p> : null}
-        <form className="stacked-form" onSubmit={(e) => void handleVoicePipelineSubmit(e)}>
-          <label>
-            Шаблон (для учётной заявки, необязательно — первый из списка)
-            <select
-              value={voiceForm.templateId}
-              onChange={(e) => setVoiceForm((c) => ({ ...c, templateId: e.target.value }))}
-            >
-              <option value="">По умолчанию (первый шаблон)</option>
-              {templateOptions.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {translateTemplateName(t.name)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Название источника (необязательно)
-            <input
-              value={voiceForm.sourceName}
-              onChange={(e) => setVoiceForm((c) => ({ ...c, sourceName: e.target.value }))}
-              placeholder="По умолчанию: «Тест голоса из админки»"
-            />
-          </label>
-          <label>
-            Какую сделку (текстом, необязательно) — номер или название, если не из голоса
-            <input
-              value={voiceForm.dealHint}
-              onChange={(e) => setVoiceForm((c) => ({ ...c, dealHint: e.target.value }))}
-              placeholder="Например: 123 или ООО Ромашка"
-            />
-          </label>
-          <label>
-            Куда / целевая стадия (текстом, необязательно) — для команды «на стадию …»
-            <input
-              value={voiceForm.stageHint}
-              onChange={(e) => setVoiceForm((c) => ({ ...c, stageHint: e.target.value }))}
-              placeholder="Например: Квалификация"
-            />
-          </label>
-          <label>
-            ID сделки Bitrix (необязательно, если произнесёте номер в аудио)
-            <input
-              value={voiceForm.dealId}
-              onChange={(e) => setVoiceForm((c) => ({ ...c, dealId: e.target.value }))}
-              placeholder="123"
-              inputMode="numeric"
-            />
-          </label>
-          <label>
-            Название сделки (если в голосе не распозналось — точное или часть названия в CRM)
-            <input
-              value={voiceForm.dealTitle}
-              onChange={(e) => setVoiceForm((c) => ({ ...c, dealTitle: e.target.value }))}
-              placeholder="Например: ТЕСТОВЫЙ ПРОЕКТ 2024"
-            />
-          </label>
-          <label>
-            Аудиофайл
-            <input
-              type="file"
-              accept="audio/*,.m4a,.ogg,.oga,.wav,.mp3,.aac,.flac"
-              onChange={(e) => setVoiceFile(e.target.files?.[0] ?? null)}
-              required
-            />
-          </label>
-          <button type="submit" disabled={voiceBusy}>
-            {voiceBusy ? "Обработка…" : "Запустить цепочку"}
-          </button>
-        </form>
-        {voiceResult ? (
-          <div className="voice-result">
-            <h3>Результат</h3>
-            <p>
-              <strong>Транскрипт:</strong> {voiceResult.transcript}
-            </p>
-            <p>
-              <strong>Распознанное действие:</strong>{" "}
-              {translateFromMap(voiceResult.parsedAction, VOICE_ACTION_LABELS)}
-            </p>
-            <p>
-              <strong>ID сделки (из текста/формы):</strong>{" "}
-              {voiceResult.parsedDealId > 0 ? voiceResult.parsedDealId : "—"}
-            </p>
-            <p>
-              <strong>Название сделки (распознано/подобрано):</strong>{" "}
-              {voiceResult.parsedDealTitle ? voiceResult.parsedDealTitle : "—"}
-            </p>
-            <p>
-              <strong>Bitrix:</strong> {voiceResult.bitrixConfigured ? "вебхук задан" : "вебхук не задан"}
-            </p>
-            <ul>
-              {voiceResult.bitrixSteps.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ul>
-            <p className="muted">
-              Заявка <code>{voiceResult.job.id}</code>, исходный файл <code>{voiceResult.sourceDocument.id}</code>
-              . Смотрите журнал событий ниже.
-            </p>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="grid">
-        <article className="card">
-          <h2>Статус backend</h2>
-          <p className="metric">
-            {translateFromMap(health?.status ?? "loading", HEALTH_STATUS_LABELS)}
-          </p>
-          <p>{health?.service ?? "Ожидание ответа от backend..."}</p>
-          <p>Среда: {health?.environment ?? "-"}</p>
-          <p>Продуктовых API-запросов: {health?.productRequestsTotal ?? 0}</p>
-          <p className="subtle">
-            Сырой HTTP total с health, `/metrics` и admin polling:{" "}
-            {health?.httpRequestsTotalRaw ?? 0}
-          </p>
-        </article>
-
-        <article className="card">
-          <h2>Шаблоны</h2>
-          <p className="metric">{summary.templateCount}</p>
-          <p>Загружено в постоянное хранилище</p>
-        </article>
-
-        <article className="card">
-          <h2>Активные заявки</h2>
-          <p className="metric">{summary.activeCount}</p>
-          <p>{summary.jobCount} всего</p>
-        </article>
-
-        <article className="card">
-          <h2>Исходные файлы</h2>
-          <p className="metric">{summary.sourceDocumentCount}</p>
-          <p>{summary.taskCommandCount} команд задач</p>
-        </article>
-      </section>
-
-      <section className="content-grid two-columns">
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Загрузка шаблона</h2>
-            <span>Постоянное хранилище шаблонов</span>
-          </div>
-
-          <form className="form-grid" onSubmit={(event) => void handleTemplateSubmit(event)}>
-            <label>
-              Название
-              <input
-                value={templateForm.name}
-                onChange={(event) =>
-                  setTemplateForm((current) => ({
-                    ...current,
-                    name: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <label>
-              Категория
-              <input
-                value={templateForm.category}
-                onChange={(event) =>
-                  setTemplateForm((current) => ({
-                    ...current,
-                    category: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <label>
-              Версия
-              <input
-                value={templateForm.version}
-                onChange={(event) =>
-                  setTemplateForm((current) => ({
-                    ...current,
-                    version: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <label className="full-width">
-              Описание
-              <textarea
-                value={templateForm.description}
-                onChange={(event) =>
-                  setTemplateForm((current) => ({
-                    ...current,
-                    description: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <label className="full-width">
-              Файл шаблона
-              <input
-                type="file"
-                onChange={(event) => setTemplateFile(event.target.files?.[0] ?? null)}
-              />
-            </label>
-            <div className="form-actions full-width">
-              <button
-                className="primary"
-                type="submit"
-                disabled={!readyToSubmitTemplate || creatingTemplate}
-              >
-                {creatingTemplate ? "Загрузка..." : "Загрузить шаблон"}
-              </button>
-            </div>
-          </form>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Создание заявки</h2>
-            <span>Постановка заявки на генерацию в очередь</span>
-          </div>
-
-          <form className="form-grid" onSubmit={(event) => void handleJobSubmit(event)}>
-            <label className="full-width">
-              Шаблон
-              <select
-                value={jobForm.templateId}
-                onChange={(event) =>
-                  setJobForm((current) => ({
-                    ...current,
-                    templateId: event.target.value
-                  }))
-                }
-              >
-                <option value="">Выберите шаблон</option>
-                {templateOptions.map((template) => (
-                  <option key={template.id} value={template.id}>
-                    {translateTemplateName(template.name)} ({template.version})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Название источника
-              <input
-                value={jobForm.sourceName}
-                onChange={(event) =>
-                  setJobForm((current) => ({
-                    ...current,
-                    sourceName: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <label>
-              Инициатор
-              <input
-                value={jobForm.requestedBy}
-                onChange={(event) =>
-                  setJobForm((current) => ({
-                    ...current,
-                    requestedBy: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <label>
-              Канал доставки
-              <select
-                value={jobForm.deliveryChannel}
-                onChange={(event) =>
-                  setJobForm((current) => ({
-                    ...current,
-                    deliveryChannel: event.target.value as "internal" | "email" | "bitrix"
-                  }))
-                }
-              >
-                <option value="internal">Внутренний</option>
-                <option value="email">Email</option>
-                <option value="bitrix">Битрикс24</option>
-              </select>
-            </label>
-            <label>
-              Адрес доставки
-              <input
-                value={jobForm.deliveryAddress}
-                onChange={(event) =>
-                  setJobForm((current) => ({
-                    ...current,
-                    deliveryAddress: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <label className="full-width">
-              Параметры / комментарий к заявке
-              <textarea
-                value={jobForm.payload}
-                onChange={(event) =>
-                  setJobForm((current) => ({
-                    ...current,
-                    payload: event.target.value
-                  }))
-                }
-              />
-            </label>
-            <div className="form-actions full-width">
-              <button
-                className="primary"
-                type="submit"
-                disabled={!readyToSubmitJob || creatingJob}
-              >
-                {creatingJob ? "Создаём..." : "Создать заявку"}
-              </button>
-            </div>
-          </form>
-        </article>
-      </section>
-
-      <section className="content-grid two-columns">
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Шаблоны документов</h2>
-            <span>{templates.length} доступно</span>
-          </div>
-
-          <div className="list">
-            {templates.map((template) => (
-              <div className="list-item" key={template.id}>
-                <div>
-                  <strong>{translateTemplateName(template.name)}</strong>
-                  <p>{translateTemplateDescription(template.description)}</p>
-                  <p className="subtle">
-                    {template.fileName} · {formatBytes(template.sizeBytes)} KB
-                  </p>
-                </div>
-                <div className="meta">
-                  <span>{translateFromMap(template.category, CATEGORY_LABELS)}</span>
-                  <span>{template.version}</span>
-                  <a
-                    href={`${apiBaseUrl}/api/v1/document-templates/${template.id}/download`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Скачать
-                  </a>
-                </div>
-              </div>
-            ))}
-            {!loading && templates.length === 0 ? (
-              <p className="empty">Загрузите первый шаблон, чтобы создавать заявки.</p>
-            ) : null}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Заявки на документы</h2>
-            <span>{jobs.length} всего</span>
-          </div>
-
-          <div className="list">
-            {jobs.map((job) => (
-              <div className="list-item stacked" key={job.id}>
-                <div className="list-topline">
-                  <div>
-                    <strong>{translateTemplateName(job.templateName)}</strong>
-                    <p>{job.sourceName}</p>
-                  </div>
-                  <div className="meta">
-                    <span className={statusClass(job.status)}>
-                      {translateFromMap(job.status, STATUS_LABELS)}
-                    </span>
-                    <span>{formatDate(job.createdAt)}</span>
-                  </div>
-                </div>
-
-                <div className="job-details">
-                  <span>
-                    Инициатор: {translateFromMap(job.requestedBy, REQUESTED_BY_LABELS)}
-                  </span>
-                  <span>
-                    Доставка: {translateFromMap(job.deliveryChannel, DELIVERY_CHANNEL_LABELS)}
-                  </span>
-                  <span>
-                    Статус отправки:{" "}
-                    {translateFromMap(job.dispatchStatus, DISPATCH_STATUS_LABELS)}
-                  </span>
-                  <span>Завершено: {formatDate(job.completedAt)}</span>
-                  {job.errorMessage ? <span>Ошибка: {translateMessage(job.errorMessage)}</span> : null}
-                </div>
-
-                <p className="payload-preview">{job.payload || "Параметры не указаны."}</p>
-
-                <div className="job-actions">
-                  <select
-                    value={jobStatusDrafts[job.id] ?? job.status}
-                    onChange={(event) =>
-                      setJobStatusDrafts((current) => ({
-                        ...current,
-                        [job.id]: event.target.value
-                      }))
-                    }
-                  >
-                    <option value="queued">В очереди</option>
-                    <option value="running">В работе</option>
-                    <option value="completed">Завершено</option>
-                    <option value="failed">Ошибка</option>
-                    <option value="cancelled">Отменено</option>
-                  </select>
-                  <button
-                    onClick={() =>
-                      void changeJobStatus(job.id, jobStatusDrafts[job.id] ?? job.status)
-                    }
-                    disabled={updatingJobId === job.id}
-                  >
-                    {updatingJobId === job.id ? "Обновляем..." : "Применить статус"}
-                  </button>
-                </div>
-              </div>
-            ))}
-            {!loading && jobs.length === 0 ? (
-              <p className="empty">Создайте первую заявку, чтобы проверить генерацию.</p>
-            ) : null}
-          </div>
-        </article>
-      </section>
-
-      <section className="content-grid two-columns">
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Исходные документы</h2>
-            <span>{sourceDocuments.length} сохранённых загрузок</span>
-          </div>
-
-          <div className="list">
-            {sourceDocuments.map((document) => (
-              <div className="list-item" key={document.id}>
-                <div>
-                  <strong>{document.fileName}</strong>
-                  <p>{translateFromMap(document.origin, ORIGIN_LABELS)}</p>
-                  <p className="subtle">
-                    {translateFromMap(document.kind, SOURCE_DOCUMENT_KIND_LABELS)} · заявка{" "}
-                    {document.jobId ?? "-"} ·{" "}
-                    {formatBytes(document.sizeBytes)} KB
-                  </p>
-                </div>
-                <div className="meta">
-                  <span>{formatDate(document.createdAt)}</span>
-                  <a
-                    href={`${apiBaseUrl}/api/v1/source-documents/${document.id}/download`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Скачать
-                  </a>
-                </div>
-              </div>
-            ))}
-            {!loading && sourceDocuments.length === 0 ? (
-              <p className="empty">
-                Здесь появятся загрузки из мобильного приложения и аудиофайлы.
-              </p>
-            ) : null}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Сгенерированные документы</h2>
-            <span>{documents.length} сохранённых файлов</span>
-          </div>
-
-          <div className="list">
-            {documents.map((document) => (
-              <div className="list-item" key={document.id}>
-                <div>
-                  <strong>{document.fileName}</strong>
-                  <p>{translateTemplateName(document.templateName)}</p>
-                  <p className="subtle">
-                    Заявка: {document.jobId} · {formatBytes(document.sizeBytes)} KB
-                  </p>
-                </div>
-                <div className="meta">
-                  <span>{formatDate(document.createdAt)}</span>
-                  <a
-                    href={`${apiBaseUrl}/api/v1/generated-documents/${document.id}/download`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Скачать
-                  </a>
-                </div>
-              </div>
-            ))}
-            {!loading && documents.length === 0 ? (
-              <p className="empty">
-                После обработки здесь появятся сгенерированные документы.
-              </p>
-            ) : null}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Команды задач</h2>
-            <span>{taskCommands.length} зарегистрировано</span>
-          </div>
-
-          <div className="list">
-            {taskCommands.map((command) => (
-              <div className="list-item stacked" key={command.id}>
-                <div className="list-topline">
-                  <div>
-                    <strong>{translateFromMap(command.targetSystem, TASK_TARGET_LABELS)}</strong>
-                    <p>{translateCommandText(command.commandText)}</p>
-                  </div>
-                  <div className="meta">
-                    <span className={statusClass(command.status)}>
-                      {translateFromMap(command.status, TASK_COMMAND_STATUS_LABELS)}
-                    </span>
-                    <span>{formatDate(command.createdAt)}</span>
-                  </div>
-                </div>
-                <p className="subtle">
-                  {translateFromMap(command.integrationMode, INTEGRATION_MODE_LABELS)} ·{" "}
-                  {translateResultMessage(command.resultMessage)}
-                </p>
-              </div>
-            ))}
-            {!loading && taskCommands.length === 0 ? (
-              <p className="empty">
-                Здесь появятся команды для Битрикс и email-согласования.
-              </p>
-            ) : null}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Журнал событий</h2>
-            <span>{summary.eventCount} последних событий</span>
-          </div>
-
-          <div className="list">
-            {events.map((event) => (
-              <div className="list-item stacked" key={event.id}>
-                <div className="list-topline">
-                  <div>
-                    <strong>{translateMessage(event.message)}</strong>
-                    <p>{translateFromMap(event.eventType, EVENT_TYPE_LABELS)}</p>
-                  </div>
-                  <div className="meta">
-                    <span className={statusClass(event.level)}>
-                      {translateFromMap(event.level, EVENT_LEVEL_LABELS)}
-                    </span>
-                    <span>{formatDate(event.createdAt)}</span>
-                  </div>
-                </div>
-                <p className="subtle">{formatEventDetails(event.details || "")}</p>
-              </div>
-            ))}
-            {!loading && events.length === 0 ? (
-              <p className="empty">Здесь появятся системные события и события заявок.</p>
-            ) : null}
-          </div>
-        </article>
-      </section>
-    </main>
+    <DashboardPageView
+      activeSection={activeSection}
+      onNavigate={setActiveSection}
+      onRefresh={() => void refresh()}
+      loading={loading || adminDashboardLoading}
+      error={error ?? adminDashboardError}
+      integrations={integrations}
+      overviewProps={{
+        documentsTotal: summary.documentCount,
+        documentsWeekDelta: countWithinDays(documents, 7),
+        tasksTotal: adminDashboard?.bitrixTasks.total ?? 0,
+        tasksWeekDelta: 0,
+        tasksLabel: adminDashboard
+          ? `${adminDashboard.bitrixTasks.totalOpen} открыто · ${adminDashboard.bitrixTasks.inProgress} в работе`
+          : "загрузка…",
+        usersTotal: adminDashboard?.authorizedUsers ?? 0,
+        usersWeekDelta: 0,
+        usersLabel: "в Bitrix24 (OAuth)",
+        activityToday: adminDashboard?.voiceActivityToday ?? 0,
+        activityLabel: adminDashboard
+          ? `${adminDashboard.voiceActivityWeek} за 7 дней (голос + Bitrix)`
+          : "голосовых действий",
+        documentsTrend,
+        jobStatusDonut,
+        bitrixTaskItems: adminDashboard?.bitrixTaskItems ?? [],
+        formatTaskDeadline: (value) => (value?.trim() ? formatDate(value) : "—"),
+        httpRateSeries,
+        metrics: dashboardMetrics,
+        systemLoad,
+        metricsSource,
+        observabilityError: observabilityError ?? adminDashboardError,
+        recentAuth: adminDashboard?.recentAuth ?? [],
+        formatAuthTime
+      }}
+      templates={templates}
+      jobs={jobs}
+      documents={documents}
+      sourceDocuments={sourceDocuments}
+      taskCommands={taskCommands}
+      events={events}
+      visibleEvents={visibleEvents}
+      safeEventsPage={safeEventsPage}
+      eventsPageCount={eventsPageCount}
+      setEventsPage={setEventsPage}
+      health={health}
+      dashboardMetrics={dashboardMetrics}
+      authorizedUsers={adminDashboard?.users ?? []}
+      apiBaseUrl={apiBaseUrl}
+      templateForm={templateForm}
+      setTemplateForm={setTemplateForm}
+      templateFile={templateFile}
+      setTemplateFile={setTemplateFile}
+      readyToSubmitTemplate={readyToSubmitTemplate}
+      creatingTemplate={creatingTemplate}
+      onTemplateSubmit={handleTemplateSubmit}
+      jobForm={jobForm}
+      setJobForm={setJobForm}
+      readyToSubmitJob={readyToSubmitJob}
+      creatingJob={creatingJob}
+      onJobSubmit={handleJobSubmit}
+      templateOptions={templateOptions}
+      jobStatusDrafts={jobStatusDrafts}
+      setJobStatusDrafts={setJobStatusDrafts}
+      updatingJobId={updatingJobId}
+      onChangeJobStatus={(jobId, status) => void changeJobStatus(jobId, status)}
+      voiceForm={voiceForm}
+      setVoiceForm={setVoiceForm}
+      voiceFile={voiceFile}
+      setVoiceFile={setVoiceFile}
+      voiceBusy={voiceBusy}
+      voiceResult={voiceResult}
+      voiceError={voiceError}
+      onVoicePipelineSubmit={handleVoicePipelineSubmit}
+      translateTemplateName={translateTemplateName}
+      translateTemplateDescription={translateTemplateDescription}
+      translateFromMap={translateFromMap}
+      translateMessage={translateMessage}
+      translateCommandText={translateCommandText}
+      translateResultMessage={translateResultMessage}
+      formatDate={formatDate}
+      formatBytes={formatBytes}
+      formatEventDetails={formatEventDetails}
+      statusClass={statusClass}
+      labels={{
+        status: STATUS_LABELS,
+        category: CATEGORY_LABELS,
+        dispatchStatus: DISPATCH_STATUS_LABELS,
+        deliveryChannel: DELIVERY_CHANNEL_LABELS,
+        requestedBy: REQUESTED_BY_LABELS,
+        origin: ORIGIN_LABELS,
+        sourceDocumentKind: SOURCE_DOCUMENT_KIND_LABELS,
+        taskTarget: TASK_TARGET_LABELS,
+        taskCommandStatus: TASK_COMMAND_STATUS_LABELS,
+        integrationMode: INTEGRATION_MODE_LABELS,
+        eventLevel: EVENT_LEVEL_LABELS,
+        eventType: EVENT_TYPE_LABELS,
+        healthStatus: HEALTH_STATUS_LABELS,
+        voiceAction: VOICE_ACTION_LABELS
+      }}
+      eventsPageSize={EVENTS_PAGE_SIZE}
+    />
   );
 }
