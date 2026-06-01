@@ -154,6 +154,16 @@ func (h *Handler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) DeleteTemplate(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if err := h.service.DeleteTemplate(r.Context(), id); err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) DownloadTemplate(w http.ResponseWriter, r *http.Request) {
 	template, err := h.service.GetTemplate(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -219,6 +229,7 @@ func (h *Handler) CreateMobileVoiceRequest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	dealID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("dealId")))
 	result, err := h.service.CreateMobileVoiceRequest(r.Context(), app.CreateMobileVoiceRequestInput{
 		TemplateID:      r.FormValue("templateId"),
 		SourceName:      r.FormValue("sourceName"),
@@ -228,6 +239,9 @@ func (h *Handler) CreateMobileVoiceRequest(w http.ResponseWriter, r *http.Reques
 		DeliveryAddress: r.FormValue("deliveryAddress"),
 		TaskCommandText: r.FormValue("taskCommandText"),
 		TaskTarget:      domain.TaskTargetSystem(strings.TrimSpace(r.FormValue("taskTarget"))),
+		BitrixDealID:    dealID,
+		BitrixDealTitle: r.FormValue("dealTitle"),
+		OAuthSessionID:  r.Header.Get(app.BitrixSessionHeaderName()),
 	}, header.Filename, header.Header.Get("Content-Type"), content)
 	if err != nil {
 		h.writeDomainError(w, err)
@@ -237,6 +251,42 @@ func (h *Handler) CreateMobileVoiceRequest(w http.ResponseWriter, r *http.Reques
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"item": result,
 	})
+}
+
+func (h *Handler) ListMobileDocumentJobs(w http.ResponseWriter, r *http.Request) {
+	items, err := h.service.ListMobileDocumentJobs(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) GetMobileDocumentJob(w http.ResponseWriter, r *http.Request) {
+	item, err := h.service.GetMobileDocumentJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": item})
+}
+
+func (h *Handler) ConfirmMobileDocumentJob(w http.ResponseWriter, r *http.Request) {
+	item, err := h.service.ConfirmMobileDocumentJob(r.Context(), r.PathValue("id"), r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": item})
+}
+
+func (h *Handler) RetryAttachMobileDocumentJob(w http.ResponseWriter, r *http.Request) {
+	item, err := h.service.RetryAttachMobileDocumentJob(r.Context(), r.PathValue("id"), r.Header.Get(app.BitrixSessionHeaderName()))
+	if err != nil {
+		h.writeDomainError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"item": item})
 }
 
 func (h *Handler) UpdateJobStatus(w http.ResponseWriter, r *http.Request) {
@@ -804,6 +854,8 @@ func (h *Handler) ListProcessingEvents(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) writeDomainError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	switch {
+	case errors.Is(err, domain.ErrTemplateInUse):
+		status = http.StatusConflict
 	case errors.Is(err, domain.ErrTemplateNotFound),
 		errors.Is(err, domain.ErrJobNotFound),
 		errors.Is(err, domain.ErrGeneratedDocumentNotFound),

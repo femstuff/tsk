@@ -84,6 +84,31 @@ func (s *Store) GetTemplateByID(ctx context.Context, id string) (domain.Template
 	return template, nil
 }
 
+func (s *Store) CountTemplateReferences(ctx context.Context, id string) (int, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*)::int FROM document_jobs WHERE template_id = $1) +
+			(SELECT COUNT(*)::int FROM generated_documents WHERE template_id = $1) +
+			(SELECT COUNT(*)::int FROM source_documents WHERE template_id = $1)
+	`, id)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *Store) DeleteTemplate(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM document_templates WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrTemplateNotFound
+	}
+	return nil
+}
+
 func (s *Store) CreateTemplate(ctx context.Context, params domain.TemplateCreateParams) (domain.Template, error) {
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO document_templates (
@@ -99,7 +124,8 @@ func (s *Store) CreateTemplate(ctx context.Context, params domain.TemplateCreate
 func (s *Store) ListJobs(ctx context.Context) ([]domain.Job, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, template_id, template_name, source_name, requested_by, payload, delivery_channel, delivery_address,
-		       dispatch_status, status, error_message, result_document_id, created_at, updated_at, started_at, completed_at
+		       dispatch_status, status, error_message, result_document_id, bitrix_deal_id, bitrix_deal_title,
+		       created_at, updated_at, started_at, completed_at
 		FROM document_jobs
 		ORDER BY created_at DESC
 	`)
@@ -121,10 +147,36 @@ func (s *Store) ListJobs(ctx context.Context) ([]domain.Job, error) {
 	return items, rows.Err()
 }
 
+func (s *Store) ListJobsByRequestedBy(ctx context.Context, requestedBy string) ([]domain.Job, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, template_id, template_name, source_name, requested_by, payload, delivery_channel, delivery_address,
+		       dispatch_status, status, error_message, result_document_id, bitrix_deal_id, bitrix_deal_title,
+		       created_at, updated_at, started_at, completed_at
+		FROM document_jobs
+		WHERE requested_by = $1
+		ORDER BY created_at DESC
+	`, strings.TrimSpace(requestedBy))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.Job, 0)
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, job)
+	}
+	return items, rows.Err()
+}
+
 func (s *Store) GetJobByID(ctx context.Context, id string) (domain.Job, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT id, template_id, template_name, source_name, requested_by, payload, delivery_channel, delivery_address,
-		       dispatch_status, status, error_message, result_document_id, created_at, updated_at, started_at, completed_at
+		       dispatch_status, status, error_message, result_document_id, bitrix_deal_id, bitrix_deal_title,
+		       created_at, updated_at, started_at, completed_at
 		FROM document_jobs
 		WHERE id = $1
 	`, id)
@@ -145,12 +197,14 @@ func (s *Store) CreateJob(ctx context.Context, params domain.JobCreateParams) (d
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO document_jobs (
 			id, template_id, template_name, source_name, requested_by, payload, delivery_channel, delivery_address,
-			dispatch_status, status, error_message, result_document_id, created_at, updated_at, started_at, completed_at
+			dispatch_status, status, error_message, result_document_id, bitrix_deal_id, bitrix_deal_title,
+			created_at, updated_at, started_at, completed_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', NULL, $11, $11, NULL, NULL)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', NULL, $11, $12, $13, $13, NULL, NULL)
 		RETURNING id, template_id, template_name, source_name, requested_by, payload, delivery_channel, delivery_address,
-		          dispatch_status, status, error_message, result_document_id, created_at, updated_at, started_at, completed_at
-	`, params.ID, params.TemplateID, params.TemplateName, params.SourceName, params.RequestedBy, params.Payload, params.DeliveryChannel, params.DeliveryAddress, params.DispatchStatus, params.Status, params.CreatedAt)
+		          dispatch_status, status, error_message, result_document_id, bitrix_deal_id, bitrix_deal_title,
+		          created_at, updated_at, started_at, completed_at
+	`, params.ID, params.TemplateID, params.TemplateName, params.SourceName, params.RequestedBy, params.Payload, params.DeliveryChannel, params.DeliveryAddress, params.DispatchStatus, params.Status, params.BitrixDealID, params.BitrixDealTitle, params.CreatedAt)
 
 	return scanJob(row)
 }
@@ -180,7 +234,8 @@ func (s *Store) ClaimNextQueuedJob(ctx context.Context) (domain.Job, error) {
 		WHERE jobs.id = picked.id
 		RETURNING jobs.id, jobs.template_id, jobs.template_name, jobs.source_name, jobs.requested_by, jobs.payload,
 		          jobs.delivery_channel, jobs.delivery_address, jobs.dispatch_status, jobs.status, jobs.error_message,
-		          jobs.result_document_id, jobs.created_at, jobs.updated_at, jobs.started_at, jobs.completed_at
+		          jobs.result_document_id, jobs.bitrix_deal_id, jobs.bitrix_deal_title,
+		          jobs.created_at, jobs.updated_at, jobs.started_at, jobs.completed_at
 	`)
 
 	job, err := scanJob(row)
@@ -211,7 +266,8 @@ func (s *Store) UpdateJobStatus(ctx context.Context, id string, params domain.Jo
 		    updated_at = $8
 		WHERE id = $1
 		RETURNING id, template_id, template_name, source_name, requested_by, payload, delivery_channel, delivery_address,
-		          dispatch_status, status, error_message, result_document_id, created_at, updated_at, started_at, completed_at
+		          dispatch_status, status, error_message, result_document_id, bitrix_deal_id, bitrix_deal_title,
+		          created_at, updated_at, started_at, completed_at
 	`, id, params.Status, params.DispatchStatus, params.ErrorMessage, params.ResultDocumentID, params.StartedAt, params.CompletedAt, params.UpdatedAt)
 
 	job, err := scanJob(row)
@@ -559,6 +615,7 @@ func scanJob(row interface {
 }) (domain.Job, error) {
 	var job domain.Job
 	var resultDocumentID *string
+	var bitrixDealID *int
 	var startedAt *time.Time
 	var completedAt *time.Time
 	err := row.Scan(
@@ -574,12 +631,15 @@ func scanJob(row interface {
 		&job.Status,
 		&job.ErrorMessage,
 		&resultDocumentID,
+		&bitrixDealID,
+		&job.BitrixDealTitle,
 		&job.CreatedAt,
 		&job.UpdatedAt,
 		&startedAt,
 		&completedAt,
 	)
 	job.ResultDocumentID = resultDocumentID
+	job.BitrixDealID = bitrixDealID
 	job.StartedAt = startedAt
 	job.CompletedAt = completedAt
 	return job, err

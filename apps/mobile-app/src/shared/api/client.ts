@@ -19,6 +19,7 @@ import type {
   DocumentTemplateSummary,
   HealthResponse,
   MobileBitrixIntentResult,
+  MobileDocumentJobView,
   MobileVoiceRequestResult,
   SourceDocumentSummary,
   TaskCommandSummary
@@ -451,6 +452,8 @@ export async function createMobileVoiceRequest(input: {
   deliveryAddress: string;
   taskCommandText: string;
   taskTarget: "bitrix24" | "email_approval";
+  dealId: number;
+  dealTitle: string;
   audioUri: string;
   audioFileName: string;
   audioMimeType: string;
@@ -464,6 +467,8 @@ export async function createMobileVoiceRequest(input: {
   formData.append("deliveryAddress", input.deliveryAddress);
   formData.append("taskCommandText", input.taskCommandText);
   formData.append("taskTarget", input.taskTarget);
+  formData.append("dealId", String(input.dealId));
+  formData.append("dealTitle", input.dealTitle);
   formData.append("audio", {
     uri: input.audioUri,
     name: input.audioFileName,
@@ -480,4 +485,40 @@ export async function createMobileVoiceRequest(input: {
   );
 
   return response.item;
+}
+
+export async function listMobileDocumentJobs() {
+  const response = await request<CollectionResponse<MobileDocumentJobView>>(
+    "/api/v1/mobile/document-jobs"
+  );
+  return itemsFrom(response);
+}
+
+export async function getMobileDocumentJob(jobId: string) {
+  const response = await request<ItemResponse<MobileDocumentJobView>>(
+    `/api/v1/mobile/document-jobs/${encodeURIComponent(jobId)}`
+  );
+  return response.item;
+}
+
+export async function confirmMobileDocumentJob(jobId: string) {
+  const response = await request<ItemResponse<MobileDocumentJobView>>(
+    `/api/v1/mobile/document-jobs/${encodeURIComponent(jobId)}/confirm`,
+    { method: "POST" }
+  );
+  return response.item;
+}
+
+export async function retryAttachMobileDocumentJob(jobId: string) {
+  const response = await request<ItemResponse<MobileDocumentJobView>>(
+    `/api/v1/mobile/document-jobs/${encodeURIComponent(jobId)}/attach-bitrix`,
+    { method: "POST" }
+  );
+  return response.item;
+}
+
+export function generatedDocumentDownloadUrl(downloadPath: string) {
+  const base = MOBILE_API_BASE_URL.replace(/\/$/, "");
+  const path = downloadPath.startsWith("/") ? downloadPath : `/${downloadPath}`;
+  return `${base}${path}`;
 }

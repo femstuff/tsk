@@ -7,6 +7,7 @@ import (
 )
 
 var ErrTemplateNotFound = errors.New("document template not found")
+var ErrTemplateInUse = errors.New("document template is referenced by jobs or documents")
 var ErrJobNotFound = errors.New("document job not found")
 var ErrGeneratedDocumentNotFound = errors.New("generated document not found")
 var ErrSourceDocumentNotFound = errors.New("source document not found")
@@ -36,6 +37,8 @@ type JobCreateParams struct {
 	DeliveryAddress string
 	DispatchStatus  DispatchStatus
 	Status          Status
+	BitrixDealID    *int
+	BitrixDealTitle string
 	CreatedAt       time.Time
 }
 
@@ -109,10 +112,13 @@ type TemplateRepository interface {
 	ListTemplates(context.Context) ([]Template, error)
 	GetTemplateByID(context.Context, string) (Template, error)
 	CreateTemplate(context.Context, TemplateCreateParams) (Template, error)
+	CountTemplateReferences(context.Context, string) (int, error)
+	DeleteTemplate(context.Context, string) error
 }
 
 type JobRepository interface {
 	ListJobs(context.Context) ([]Job, error)
+	ListJobsByRequestedBy(context.Context, string) ([]Job, error)
 	GetJobByID(context.Context, string) (Job, error)
 	CreateJob(context.Context, JobCreateParams) (Job, error)
 	ClaimNextQueuedJob(context.Context) (Job, error)

@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:p><w:r><w:t>СМЕТА НА СТРОИТЕЛЬНО-ОТДЕЛОЧНЫЕ РАБОТЫ</w:t></w:r></w:p>
+<w:p><w:r><w:t>Локальный сметный расчёт № {{estimateNumber}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>Наименование стройки: {{projectName}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>Наименование работ и затрат: {{objectDescription}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>Основание (чертежи): {{basis}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>Сметная стоимость: {{estimatedCost}} руб.</w:t></w:r></w:p>
+<w:p><w:r><w:t>Средства на оплату труда: {{laborCosts}} руб.</w:t></w:r></w:p>
+<w:p><w:r><w:t>Цены на дату: {{priceDate}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>Составил: {{approver}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>Табличная часть:</w:t></w:r></w:p>
+<w:p><w:r><w:t>{{lineItems}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>Итого прямые затраты: {{totalDirectCosts}} руб.</w:t></w:r></w:p>
+<w:p><w:r><w:t>ВСЕГО ПО СМЕТЕ: {{grandTotal}} руб.</w:t></w:r></w:p>
+</w:body>
+</w:document>

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -26,18 +27,23 @@ import type {
   DocumentJobSummary,
   DocumentTemplateSummary,
   HealthResponse,
+  MobileDocumentJobView,
   SourceDocumentSummary
 } from "../entities/document-template/types";
+import { EstimateDocumentFlowScreen } from "../features/documents/EstimateDocumentFlowScreen";
 import {
   createMobileBitrixIntentMultipart,
   createMobileBitrixIntentText,
-  createMobileVoiceRequest,
+  generatedDocumentDownloadUrl,
   getHealth,
   getMobileApiBaseUrl,
+  getMobileDocumentJob,
   listBitrixDeals,
   listBitrixNotifications,
   listBitrixTasks,
   listJobs,
+  listMobileDocumentJobs,
+  retryAttachMobileDocumentJob,
   listSourceDocuments,
   listTemplates,
   BitrixIntentError,
@@ -135,11 +141,33 @@ function formatDate(value: string | null) {
   }).format(new Date(value));
 }
 
+function jobStatusRu(status: string) {
+  switch (status) {
+    case "awaiting_review":
+      return "На проверке";
+    case "awaiting_bitrix_attach":
+      return "Ждёт Bitrix";
+    case "queued":
+      return "В очереди";
+    case "running":
+      return "Обработка";
+    case "completed":
+      return "Готово";
+    case "failed":
+      return "Ошибка";
+    default:
+      return status;
+  }
+}
+
 function statusColor(status: string) {
   switch (status) {
     case "completed":
     case "sent":
       return "#15803d";
+    case "awaiting_review":
+    case "awaiting_bitrix_attach":
+      return "#b45309";
     case "running":
     case "pending":
       return "#0369a1";
@@ -156,6 +184,10 @@ export function HomeScreen() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [templates, setTemplates] = useState<DocumentTemplateSummary[]>([]);
   const [jobs, setJobs] = useState<DocumentJobSummary[]>([]);
+  const [mobileDocumentJobs, setMobileDocumentJobs] = useState<MobileDocumentJobView[]>([]);
+  const [docDetailJob, setDocDetailJob] = useState<MobileDocumentJobView | null>(null);
+  const [docAttachRetrying, setDocAttachRetrying] = useState(false);
+  const [docDetailLoading, setDocDetailLoading] = useState(false);
   const [sourceDocuments, setSourceDocuments] = useState<SourceDocumentSummary[]>([]);
   const [bitrixTasks, setBitrixTasks] = useState<BitrixTaskSummary[]>([]);
   const [bitrixTaskStats, setBitrixTaskStats] = useState<BitrixTaskStats | null>(null);
@@ -314,11 +346,12 @@ export function HomeScreen() {
     }
     setError(null);
     try {
-      const [nextHealth, nextTemplates, nextJobs, nextSourceDocuments] = await Promise.all([
+      const [nextHealth, nextTemplates, nextJobs, nextSourceDocuments, nextMobileDocs] = await Promise.all([
         getHealth(),
         listTemplates(),
         listJobs(),
-        listSourceDocuments()
+        listSourceDocuments(),
+        listMobileDocumentJobs().catch(() => [] as MobileDocumentJobView[])
       ]);
 
       let bitrixBundle: Awaited<ReturnType<typeof listBitrixTasks>> | null = null;
@@ -338,6 +371,7 @@ export function HomeScreen() {
       setSourceDocuments(
         nextSourceDocuments.filter((document) => document.origin === "mobile-app")
       );
+      setMobileDocumentJobs(nextMobileDocs);
       if (bitrixBundle && Array.isArray(bitrixBundle.items)) {
         setBitrixTasks(bitrixBundle.items);
         setBitrixTaskStats(bitrixBundle.stats ?? null);
@@ -412,14 +446,19 @@ export function HomeScreen() {
     };
   }, []);
 
-  const estimateTemplate = useMemo(
-    () =>
-      templates.find((template) => {
-        const cat = template.category.toLowerCase();
-        return cat === "estimate" || cat === "smeta" || cat === "смета" || cat === "сметы";
-      }) ?? null,
-    [templates]
-  );
+  const estimateTemplate = useMemo(() => {
+    const matches = templates.filter((template) => {
+      const cat = template.category.toLowerCase();
+      if (cat === "estimate" || cat === "smeta" || cat === "смета" || cat === "сметы") {
+        return true;
+      }
+      return template.name.toLowerCase().includes("смет");
+    });
+    const docx =
+      matches.find((t) => t.fileName.toLowerCase().endsWith(".docx")) ??
+      matches.find((t) => t.fileName.toLowerCase().endsWith(".doc"));
+    return docx ?? matches[0] ?? null;
+  }, [templates]);
 
   useEffect(() => {
     if (estimateTemplate && !requestForm.templateId) {
@@ -670,42 +709,15 @@ export function HomeScreen() {
     }
   };
 
-  const submitVoiceRequest = async () => {
-    if (!docAudioUri || !selectedTemplate) {
-      return;
-    }
-    setSubmittingRequest(true);
-    beginSubmitProgress("Формирование сметы", estimateProgressMessage);
+  const openDocumentJobDetail = async (jobId: string) => {
+    setDocDetailLoading(true);
     try {
-      await createMobileVoiceRequest({
-        ...requestForm,
-        templateId: selectedTemplate.id,
-        sourceName: requestForm.sourceName.trim() || selectedTemplate.name,
-        audioUri: docAudioUri,
-        audioFileName: `voice-request-${Date.now()}.m4a`,
-        audioMimeType: "audio/mp4"
-      });
-      await stopPreviewPlayback();
-      setDocAudioUri(null);
-      setDocRecordingPhase("idle");
-      setRequestForm((current) => ({
-        ...current,
-        sourceName: "",
-        payload: "",
-        taskCommandText: ""
-      }));
-      void refreshAfterSubmit();
-      setDocVoiceOpen(false);
-      Alert.alert("Готово", "Смета отправлена: голос распознан и поставлен в очередь на формирование.");
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Ошибка отправки");
-      Alert.alert(
-        "Ошибка отправки",
-        nextError instanceof Error ? nextError.message : "Не удалось отправить смету"
-      );
+      const item = await getMobileDocumentJob(jobId);
+      setDocDetailJob(item);
+    } catch (err) {
+      Alert.alert("Ошибка", err instanceof Error ? err.message : "Не удалось открыть документ");
     } finally {
-      endSubmitProgress();
-      setSubmittingRequest(false);
+      setDocDetailLoading(false);
     }
   };
 
@@ -918,6 +930,7 @@ export function HomeScreen() {
     if (estimateTemplate) {
       setRequestForm((current) => ({ ...current, templateId: estimateTemplate.id }));
     }
+    void loadBitrixDeals(bitrixDealsSearch, false);
     setDocVoiceOpen(true);
   };
 
@@ -1352,8 +1365,9 @@ export function HomeScreen() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Смета</Text>
         <Text style={styles.muted}>
-          Запишите голосом все поля локальной сметы (форма № 4): стройка, основание, стоимость,
-          строки работ — всё, что произнесёте, попадёт в документ.
+          Диктуйте поля по фразам: «наименование стройки ТРЦ Кристалл», «сметная стоимость 1 250 000
+          рублей», «позиция 1, наименование монтаж кровли, количество 500». Текст подставится в
+          шаблон сметы автоматически.
         </Text>
         <Pressable style={styles.docTileWide} onPress={openEstimateVoice}>
           <View style={styles.docIconWrapWide}>
@@ -1572,36 +1586,35 @@ export function HomeScreen() {
   const renderDocsTab = () => (
     <>
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Заявки на документы (TSK)</Text>
-        {jobs.length === 0 ? (
-          <Text style={styles.muted}>Пока нет заявок с этого телефона.</Text>
+        <Text style={styles.cardTitle}>Мои сметы</Text>
+        <Text style={styles.muted}>
+          Все сформированные документы с этого телефона. Нажмите, чтобы посмотреть распознанные поля и
+          скачать файл.
+        </Text>
+        <Pressable style={[styles.button, styles.primaryButton, { marginTop: 12 }]} onPress={openEstimateVoice}>
+          <Text style={styles.buttonText}>Новая смета голосом</Text>
+        </Pressable>
+        {mobileDocumentJobs.length === 0 ? (
+          <Text style={[styles.muted, { marginTop: 12 }]}>Пока нет документов.</Text>
         ) : null}
-        {jobs.map((job) => (
-          <View key={job.id} style={styles.listItem}>
+        {mobileDocumentJobs.map((entry) => (
+          <Pressable
+            key={entry.job.id}
+            style={styles.listItem}
+            onPress={() => void openDocumentJobDetail(entry.job.id)}
+          >
             <View style={styles.listHeader}>
-              <Text style={styles.listTitle}>{job.sourceName}</Text>
-              <Text style={[styles.badge, { color: statusColor(job.status) }]}>{job.status}</Text>
+              <Text style={styles.listTitle}>{entry.job.sourceName}</Text>
+              <Text style={[styles.badge, { color: statusColor(entry.job.status) }]}>
+                {jobStatusRu(entry.job.status)}
+              </Text>
             </View>
             <Text style={styles.muted}>
-              {job.templateName} · {job.dispatchStatus}
+              {entry.job.templateName}
+              {entry.job.bitrixDealTitle ? ` · ${entry.job.bitrixDealTitle}` : ""}
             </Text>
-            <Text style={styles.muted}>{formatDate(job.createdAt)}</Text>
-          </View>
-        ))}
-      </View>
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Файлы</Text>
-        {sourceDocuments.length === 0 ? (
-          <Text style={styles.muted}>Нет загруженных голосовых файлов.</Text>
-        ) : null}
-        {sourceDocuments.map((document) => (
-          <View key={document.id} style={styles.listItem}>
-            <Text style={styles.listTitle}>{document.fileName}</Text>
-            <Text style={styles.muted}>
-              {document.kind} · {Math.round(document.sizeBytes / 1024)} KB
-            </Text>
-            <Text style={styles.muted}>{formatDate(document.createdAt)}</Text>
-          </View>
+            <Text style={styles.muted}>{formatDate(entry.job.createdAt)}</Text>
+          </Pressable>
         ))}
       </View>
     </>
@@ -1805,105 +1818,31 @@ export function HomeScreen() {
   );
 
   const renderVoiceFullScreen = () => (
-    <View style={styles.voiceRoot}>
-      <View style={[styles.voiceHeader, { paddingTop: topInset + 8 }]}>
-        <Pressable
-          onPress={() => {
-            void stopPreviewPlayback();
-            setDocVoiceOpen(false);
-          }}
-          hitSlop={12}
-        >
-          <Text style={styles.voiceClose}>Закрыть</Text>
-        </Pressable>
-        <Text style={styles.voiceTitle}>Смета голосом</Text>
-        <View style={{ width: 56 }} />
-      </View>
-      <ScrollView
-        style={styles.voiceScroll}
-        contentContainerStyle={styles.voiceScrollContent}
-        keyboardShouldPersistTaps="handled"
-        nestedScrollEnabled
-      >
-        <Text style={styles.muted}>
-          Произнесите поля формы № 4: номер сметы, наименование стройки, основание, стоимость,
-          оплату труда, строки работ (шифр, наименование, единица, количество, цены). Сервер
-          распознает речь через Whisper и заполнит документ.
-        </Text>
-
-        {selectedTemplate ? (
-          <View style={[styles.templateCard, styles.templateCardSelected]}>
-            <Text style={styles.templateName}>{selectedTemplate.name}</Text>
-            <Text style={styles.templateMeta}>Категория: смета · {selectedTemplate.version}</Text>
-          </View>
-        ) : (
-          <View style={styles.warnBox}>
-            <Text style={styles.warnText}>
-              Шаблон сметы не найден на сервере. Перезапустите backend или загрузите шаблон в
-              админке.
-            </Text>
-          </View>
-        )}
-
-        <Text style={styles.sectionLabel}>Запись</Text>
-        <View style={styles.row} key={`doc-rec-${docRecordingPhase}`}>
-          {renderRecordingControls(
-            docRecordingPhase,
-            docAudioUri,
-            () => void startDocRecording(),
-            () => void stopDocRecording(),
-            () => void resetDocRecordingDraft(),
-            () => void togglePreviewPlayback(docAudioUri)
-          )}
-        </View>
-        <Text style={styles.muted}>{recordingStatusText(docRecordingPhase)}</Text>
-
-        <Text style={styles.sectionLabel}>Название (необязательно)</Text>
-        <TextInput
-          placeholder="Например: Смета на кровлю — ЖК Север"
-          placeholderTextColor="#94a3b8"
-          style={styles.input}
-          value={requestForm.sourceName}
-          onChangeText={(value) =>
-            setRequestForm((current) => ({ ...current, sourceName: value }))
-          }
-        />
-        <TextInput
-          placeholder="Дополнение текстом (если что-то не сказали вслух)"
-          placeholderTextColor="#94a3b8"
-          style={[styles.input, styles.textArea]}
-          multiline
-          value={requestForm.payload}
-          onChangeText={(value) =>
-            setRequestForm((current) => ({ ...current, payload: value }))
-          }
-        />
-
-        <Pressable
-          onPress={() => void submitVoiceRequest()}
-          disabled={
-            submittingRequest ||
-            docRecordingPhase !== "ready" ||
-            !docAudioUri ||
-            !selectedTemplate
-          }
-          style={[
-            styles.button,
-            styles.primaryButton,
-            styles.submitWide,
-            (submittingRequest ||
-              docRecordingPhase !== "ready" ||
-              !docAudioUri ||
-              !selectedTemplate) &&
-              styles.buttonDisabled
-          ]}
-        >
-          <Text style={styles.buttonText}>
-            {submittingRequest ? "Отправка…" : "Сформировать смету"}
-          </Text>
-        </Pressable>
-      </ScrollView>
-    </View>
+    <EstimateDocumentFlowScreen
+      topInset={topInset}
+      template={selectedTemplate}
+      deals={bitrixDeals}
+      dealsLoading={bitrixDealsLoading}
+      bitrixConnected={bitrixAuth.connected}
+      recordingPhase={docRecordingPhase}
+      audioUri={docAudioUri}
+      sourceName={requestForm.sourceName}
+      payloadExtra={requestForm.payload}
+      onClose={() => {
+        void stopPreviewPlayback();
+        setDocVoiceOpen(false);
+      }}
+      onSuccess={() => void refresh()}
+      onSourceNameChange={(value) => setRequestForm((c) => ({ ...c, sourceName: value }))}
+      onPayloadExtraChange={(value) => setRequestForm((c) => ({ ...c, payload: value }))}
+      onStartRecording={() => void startDocRecording()}
+      onStopRecording={() => void stopDocRecording()}
+      onResetRecording={() => void resetDocRecordingDraft()}
+      onPreview={() => void togglePreviewPlayback(docAudioUri)}
+      previewPlayingUri={previewPlayingUri}
+      renderRecordingControls={renderRecordingControls}
+      recordingStatusText={recordingStatusText}
+    />
   );
 
   if (bitrixVoiceOpen) {
@@ -2031,6 +1970,92 @@ export function HomeScreen() {
         onClose={closeTaskDetail}
         onUpdated={() => void refresh({ pull: true })}
       />
+      <Modal
+        visible={docDetailJob !== null}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setDocDetailJob(null)}
+      >
+        <View style={[styles.voiceRoot, { backgroundColor: "#f8fafc" }]}>
+          <View style={[styles.voiceHeader, { paddingTop: topInset + 8 }]}>
+            <Pressable onPress={() => setDocDetailJob(null)} hitSlop={12}>
+              <Text style={styles.voiceClose}>Закрыть</Text>
+            </Pressable>
+            <Text style={styles.voiceTitle}>Документ</Text>
+            <View style={{ width: 56 }} />
+          </View>
+          {docDetailLoading ? (
+            <ActivityIndicator color={HEADER_BLUE} style={{ marginTop: 24 }} />
+          ) : docDetailJob ? (
+            <ScrollView contentContainerStyle={styles.voiceScrollContent}>
+              <Text style={styles.listTitle}>{docDetailJob.job.sourceName}</Text>
+              <Text style={styles.muted}>
+                {jobStatusRu(docDetailJob.job.status)} · {formatDate(docDetailJob.job.createdAt)}
+              </Text>
+              {docDetailJob.job.bitrixDealTitle ? (
+                <Text style={styles.muted}>Сделка: {docDetailJob.job.bitrixDealTitle}</Text>
+              ) : null}
+              {(docDetailJob.estimate.validationWarnings ?? []).length > 0 ? (
+                <View style={styles.warnBox}>
+                  {(docDetailJob.estimate.validationWarnings ?? []).map((w) => (
+                    <Text key={w} style={styles.warnText}>
+                      • {w}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+              <Text style={styles.sectionLabel}>Поля сметы</Text>
+              <Text style={styles.muted}>Стройка: {docDetailJob.estimate.projectName || "—"}</Text>
+              <Text style={styles.muted}>Работы: {docDetailJob.estimate.objectDescription || "—"}</Text>
+              <Text style={styles.muted}>Основание: {docDetailJob.estimate.basis || "—"}</Text>
+              <Text style={styles.muted}>Стоимость: {docDetailJob.estimate.estimatedCost || "—"}</Text>
+              <Text style={styles.muted}>Итого: {docDetailJob.estimate.grandTotal || "—"}</Text>
+              {docDetailJob.job.errorMessage ? (
+                <View style={[styles.warnBox, { marginTop: 12 }]}>
+                  <Text style={styles.warnText}>{docDetailJob.job.errorMessage}</Text>
+                </View>
+              ) : null}
+              {docDetailJob.canRetryBitrixAttach ? (
+                <Pressable
+                  disabled={docAttachRetrying}
+                  style={[styles.button, styles.primaryButton, { marginTop: 12 }]}
+                  onPress={async () => {
+                    setDocAttachRetrying(true);
+                    try {
+                      const item = await retryAttachMobileDocumentJob(docDetailJob.job.id);
+                      setDocDetailJob(item);
+                      if (!item.canRetryBitrixAttach) {
+                        Alert.alert("Bitrix24", "Смета прикреплена к сделке");
+                        void refresh({ pull: true });
+                      }
+                    } catch (err) {
+                      Alert.alert(
+                        "Bitrix24",
+                        err instanceof Error ? err.message : "Не удалось прикрепить"
+                      );
+                    } finally {
+                      setDocAttachRetrying(false);
+                    }
+                  }}
+                >
+                  <Text style={styles.buttonText}>
+                    {docAttachRetrying ? "Прикрепление…" : "Повторить прикрепление к сделке"}
+                  </Text>
+                </Pressable>
+              ) : null}
+              {docDetailJob.downloadPath ? (
+                <Pressable
+                  style={[styles.button, styles.primaryButton, { marginTop: 16 }]}
+                  onPress={() => void Linking.openURL(generatedDocumentDownloadUrl(docDetailJob.downloadPath!))}
+                >
+                  <Text style={styles.buttonText}>Открыть файл</Text>
+                </Pressable>
+              ) : null}
+            </ScrollView>
+          ) : null}
+        </View>
+      </Modal>
+
       <BitrixDealDetailModal
         dealId={selectedDealId}
         visible={selectedDealId != null}

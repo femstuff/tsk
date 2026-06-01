@@ -21,10 +21,60 @@ export type DocumentJobSummary = {
   status: string;
   errorMessage: string;
   resultDocumentId: string | null;
+  bitrixDealId?: number | null;
+  bitrixDealTitle?: string;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
+};
+
+export type EstimateLineItem = {
+  seq: number;
+  code: string;
+  description: string;
+  unit: string;
+  quantity: string;
+  basePricePerUnit: string;
+  basePriceTotal: string;
+  currentPricePerUnit: string;
+  currentPriceTotal: string;
+};
+
+export type EstimatePreview = {
+  estimateNumber: string;
+  projectName: string;
+  objectDescription: string;
+  basis: string;
+  estimatedCost: string;
+  laborCosts: string;
+  priceDate: string;
+  approver: string;
+  totalDirectCosts: string;
+  grandTotal: string;
+  lineItems: EstimateLineItem[];
+  rawTranscript: string;
+  validationWarnings: string[];
+};
+
+export type GeneratedDocumentSummary = {
+  id: string;
+  jobId: string;
+  templateId: string;
+  templateName: string;
+  fileName: string;
+  mimeType: string;
+  storageKey: string;
+  sizeBytes: number;
+  createdAt: string;
+};
+
+export type MobileDocumentJobView = {
+  job: DocumentJobSummary;
+  estimate: EstimatePreview;
+  generatedDocument?: GeneratedDocumentSummary;
+  downloadPath?: string;
+  canRetryBitrixAttach?: boolean;
 };
 
 export type SourceDocumentSummary = {
@@ -71,6 +121,9 @@ export type MobileVoiceRequestResult = {
   job: DocumentJobSummary;
   sourceDocument: SourceDocumentSummary;
   taskCommand?: TaskCommandSummary;
+  estimate: EstimatePreview;
+  transcript: string;
+  generatedDocument?: GeneratedDocumentSummary;
 };
 
 export type BitrixTaskPerson = {

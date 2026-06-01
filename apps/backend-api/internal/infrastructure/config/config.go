@@ -20,7 +20,11 @@ type Config struct {
 	BitrixPortalDomain      string
 	BitrixOAuthRedirectURI  string
 	BitrixMobileAppScheme   string
+	BitrixDealEstimateField string
 	PrometheusURL           string
+	LLMAPIURL               string
+	LLMAPIKey               string
+	LLMModel                string
 	ReadTimeout             time.Duration
 	WriteTimeout        time.Duration
 	ShutdownTimeout     time.Duration
@@ -44,7 +48,11 @@ func Load() Config {
 		BitrixPortalDomain:      getenv("BITRIX_PORTAL_DOMAIN", ""),
 		BitrixOAuthRedirectURI:  getenv("BITRIX_OAUTH_REDIRECT_URI", ""),
 		BitrixMobileAppScheme:   getenv("BITRIX_MOBILE_APP_SCHEME", "tsk"),
+		BitrixDealEstimateField: getenv("BITRIX_DEAL_ESTIMATE_FIELD", ""),
 		PrometheusURL:             getenv("PROMETHEUS_URL", ""),
+		LLMAPIURL:                 getenv("LLM_API_URL", ""),
+		LLMAPIKey:                 getenv("LLM_API_KEY", ""),
+		LLMModel:                  getenv("LLM_MODEL", ""),
 		ReadTimeout:             durationFromEnv("HTTP_READ_TIMEOUT", 300*time.Second),
 		WriteTimeout:            durationFromEnv("HTTP_WRITE_TIMEOUT", 300*time.Second),
 		ShutdownTimeout:     durationFromEnv("HTTP_SHUTDOWN_TIMEOUT", 10*time.Second),

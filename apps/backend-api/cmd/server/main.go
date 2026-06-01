@@ -11,6 +11,7 @@ import (
 	"time"
 
 	app "tsk/backend-api/internal/application/documentjob"
+	"tsk/backend-api/internal/application/estimateintent"
 	"tsk/backend-api/internal/infrastructure/cache"
 	"tsk/backend-api/internal/infrastructure/config"
 	"tsk/backend-api/internal/infrastructure/metrics"
@@ -87,14 +88,22 @@ func main() {
 		cfg.StorageRoot,
 		collector,
 		app.IntegrationsConfig{
-			BitrixWebhookURL: cfg.BitrixWebhookURL,
-			ApprovalEmail:    cfg.ApprovalEmail,
-			BitrixOAuth:      oauthCfg,
+			BitrixWebhookURL:        cfg.BitrixWebhookURL,
+			BitrixDealEstimateField: cfg.BitrixDealEstimateField,
+			ApprovalEmail:           cfg.ApprovalEmail,
+			BitrixOAuth:             oauthCfg,
 		},
 		whisperClient,
 		bitrixClient,
 		store,
 	)
+	if enricher := estimateintent.NewLLMEnricher(cfg.LLMAPIURL, cfg.LLMAPIKey, cfg.LLMModel, &http.Client{Timeout: 90 * time.Second}); enricher != nil {
+		service.SetEstimateLLM(enricher)
+		logger.Info("estimate LLM enricher enabled", "model", cfg.LLMModel, "url", cfg.LLMAPIURL)
+	} else {
+		logger.Info("estimate LLM enricher disabled (set LLM_API_KEY to enable)")
+	}
+
 	if err := service.EnsureSeedData(ctx); err != nil {
 		logger.Error("failed to ensure seed data", "error", err)
 		os.Exit(1)

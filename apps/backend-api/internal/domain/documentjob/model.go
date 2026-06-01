@@ -5,17 +5,21 @@ import "time"
 type Status string
 
 const (
-	StatusQueued    Status = "queued"
-	StatusRunning   Status = "running"
-	StatusCompleted Status = "completed"
-	StatusFailed    Status = "failed"
-	StatusCancelled Status = "cancelled"
+	StatusQueued          Status = "queued"
+	StatusRunning         Status = "running"
+	StatusAwaitingReview      Status = "awaiting_review"
+	StatusAwaitingBitrixAttach Status = "awaiting_bitrix_attach"
+	StatusCompleted           Status = "completed"
+	StatusFailed          Status = "failed"
+	StatusCancelled       Status = "cancelled"
 )
 
 func ValidStatuses() []Status {
 	return []Status{
 		StatusQueued,
 		StatusRunning,
+		StatusAwaitingReview,
+		StatusAwaitingBitrixAttach,
 		StatusCompleted,
 		StatusFailed,
 		StatusCancelled,
@@ -107,6 +111,8 @@ type Job struct {
 	Status           Status          `json:"status"`
 	ErrorMessage     string          `json:"errorMessage"`
 	ResultDocumentID *string         `json:"resultDocumentId"`
+	BitrixDealID     *int            `json:"bitrixDealId,omitempty"`
+	BitrixDealTitle  string          `json:"bitrixDealTitle,omitempty"`
 	CreatedAt        time.Time       `json:"createdAt"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
 	StartedAt        *time.Time      `json:"startedAt"`
